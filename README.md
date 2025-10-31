@@ -2,7 +2,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
 
 **Linear-Complexity Sequence Modeling via Spectral Decomposition**
 
@@ -50,13 +50,18 @@ Temporal Eigenstate Networks (TEN) is a novel neural architecture that achieves 
 
 ## 🔧 Installation
 
-### From Source
+### Internal Installation (Genovo Technologies Employees Only)
 
 ```bash
+# Clone from internal repository
 git clone https://github.com/genovotechnologies/temporal-eigenstate-networks.git
 cd temporal-eigenstate-networks
+
+# Install in development mode
 pip install -e .
 ```
+
+**Note**: This repository is private and accessible only to authorized Genovo Technologies personnel.
 
 ### Requirements
 
@@ -419,15 +424,15 @@ Tests cover:
 
 ---
 
-## 🤝 Contributing
+## 🤝 Contributing (Internal Only)
 
-We welcome contributions! Please:
+**For Genovo Technologies Employees:**
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+1. Create a feature branch (`git checkout -b feature/your-feature`)
+2. Commit your changes with clear messages
+3. Push to the branch (`git push origin feature/your-feature`)
+4. Open a Pull Request for review
+5. Obtain approval from project maintainers
 
 ### Development Setup
 
@@ -435,6 +440,8 @@ We welcome contributions! Please:
 pip install -e ".[dev]"
 pre-commit install
 ```
+
+**Reminder**: All code and algorithms are proprietary. Do not share externally without explicit written permission.
 
 ---
 
@@ -449,7 +456,21 @@ pre-commit install
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is proprietary software owned by Genovo Technologies. All rights reserved.
+
+**INTERNAL USE ONLY** - This software is for exclusive use within Genovo Technologies and authorized parties only. Unauthorized distribution, modification, or use is strictly prohibited.
+
+See the [LICENSE](LICENSE) file for complete terms and conditions.
+
+## 🔒 Security & Confidentiality
+
+This repository contains proprietary algorithms and trade secrets.
+
+- **Confidentiality Policy**: See [CONFIDENTIALITY.md](CONFIDENTIALITY.md)
+- **Security Guidelines**: See [SECURITY.md](SECURITY.md)
+- **Report Security Issues**: security@genovotech.com
+
+**All users must comply with confidentiality and security policies.**
 
 ---
 

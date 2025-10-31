@@ -2,9 +2,12 @@
 Temporal Eigenstate Networks (TEN) - Production Implementation
 ===============================================================
 
+Copyright (c) 2025 Genovo Technologies. All Rights Reserved.
+PROPRIETARY AND CONFIDENTIAL - Internal Use Only
+
 Author: Oluwatosin Afolabi
 Company: Genovo Technologies
-GitHub: https://github.com/genovotechnologies/temporal-eigenstate-networks
+Email: afolabi@genovotech.com
 
 This is the corrected, production-ready implementation with:
 - Proper complex number handling
@@ -12,6 +15,9 @@ This is the corrected, production-ready implementation with:
 - Efficient batch processing
 - Memory optimization
 - Comprehensive documentation
+
+NOTICE: This software contains proprietary algorithms and trade secrets.
+Unauthorized use, disclosure, or distribution is strictly prohibited.
 """
 
 import torch

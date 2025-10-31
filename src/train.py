@@ -1,4 +1,8 @@
-"""Training script for Temporal Eigenstate Networks."""
+"""Training script for Temporal Eigenstate Networks.
+
+Copyright (c) 2025 Genovo Technologies. All Rights Reserved.
+PROPRIETARY AND CONFIDENTIAL - Internal Use Only
+"""
 
 import torch
 import torch.nn as nn
