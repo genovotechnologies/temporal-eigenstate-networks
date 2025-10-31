@@ -12,8 +12,13 @@ Company: Genovo Technologies
 from .model import (
     TemporalEigenstateNetwork,
     TemporalEigenstateConfig,
-    EigenstateAttention,
+    TemporalFlowCell,
+    ResonanceBlock,
+    HierarchicalTEN,
 )
+
+# Alias for compatibility
+EigenstateAttention = ResonanceBlock
 
 __version__ = "0.1.0"
 __author__ = "Oluwatosin Afolabi"
@@ -24,4 +29,7 @@ __all__ = [
     "TemporalEigenstateNetwork",
     "TemporalEigenstateConfig",
     "EigenstateAttention",
+    "TemporalFlowCell",
+    "ResonanceBlock",
+    "HierarchicalTEN",
 ]

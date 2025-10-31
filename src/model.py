@@ -24,7 +24,39 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, List
+from dataclasses import dataclass
 import math
+
+
+@dataclass
+class TemporalEigenstateConfig:
+    """
+    Configuration class for Temporal Eigenstate Networks.
+    
+    Args:
+        d_model: Hidden dimension (must be divisible by n_heads)
+        n_heads: Number of attention heads
+        n_layers: Number of TEN layers
+        d_ff: Feedforward network dimension (default: 4 * d_model)
+        max_seq_len: Maximum sequence length
+        num_eigenstates: Number of eigenstates (K), typically 32-128
+        dropout: Dropout probability
+        vocab_size: Vocabulary size (for language modeling)
+    """
+    d_model: int = 512
+    n_heads: int = 8
+    n_layers: int = 6
+    d_ff: int = None
+    max_seq_len: int = 4096
+    num_eigenstates: int = 64
+    dropout: float = 0.1
+    vocab_size: int = None
+    
+    def __post_init__(self):
+        if self.d_ff is None:
+            self.d_ff = 4 * self.d_model
+        if self.d_model % self.n_heads != 0:
+            raise ValueError(f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})")
 
 
 class TemporalFlowCell(nn.Module):
@@ -230,17 +262,19 @@ class TemporalEigenstateNetwork(nn.Module):
     eigenstate-based temporal dynamics for O(T) complexity.
     
     Args:
-        vocab_size: Size of vocabulary
-        dim: Hidden dimension
-        num_layers: Number of resonance blocks
-        num_cells: Cells per block
-        num_eigenstates: Total eigenstates per block
-        max_seq_len: Maximum sequence length
-        dropout: Dropout rate
+        config: TemporalEigenstateConfig object, OR
+        vocab_size: Size of vocabulary (legacy)
+        dim: Hidden dimension (legacy)
+        num_layers: Number of resonance blocks (legacy)
+        num_cells: Cells per block (legacy)
+        num_eigenstates: Total eigenstates per block (legacy)
+        max_seq_len: Maximum sequence length (legacy)
+        dropout: Dropout rate (legacy)
     """
     def __init__(
         self,
-        vocab_size: int,
+        config = None,
+        vocab_size: int = None,
         dim: int = 512,
         num_layers: int = 6,
         num_cells: int = 4,
@@ -250,12 +284,29 @@ class TemporalEigenstateNetwork(nn.Module):
     ):
         super().__init__()
         
+        # Handle both config object and individual parameters
+        if config is not None:
+            if isinstance(config, TemporalEigenstateConfig):
+                self.config = config
+                dim = config.d_model
+                num_layers = config.n_layers
+                num_eigenstates = config.num_eigenstates
+                max_seq_len = config.max_seq_len
+                dropout = config.dropout
+                vocab_size = config.vocab_size
+            else:
+                # First argument is vocab_size (legacy mode)
+                vocab_size = config
+                self.config = None
+        else:
+            self.config = None
+        
         self.vocab_size = vocab_size
         self.dim = dim
         self.num_layers = num_layers
         
-        # Token embeddings
-        self.token_emb = nn.Embedding(vocab_size, dim)
+        # Token embeddings (only if vocab_size is provided)
+        self.token_emb = nn.Embedding(vocab_size, dim) if vocab_size else None
         
         # Learnable positional embeddings (optional, TEN doesn't strictly need them)
         self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, dim) * 0.02)
@@ -269,11 +320,14 @@ class TemporalEigenstateNetwork(nn.Module):
         # Final layer norm
         self.norm = nn.LayerNorm(dim)
         
-        # Output projection to vocabulary
-        self.output = nn.Linear(dim, vocab_size, bias=False)
-        
-        # Tie weights (standard practice)
-        self.output.weight = self.token_emb.weight
+        # Output projection to vocabulary (only if vocab_size is provided)
+        if vocab_size:
+            self.output = nn.Linear(dim, vocab_size, bias=False)
+            # Tie weights (standard practice)
+            if self.token_emb is not None:
+                self.output.weight = self.token_emb.weight
+        else:
+            self.output = None
         
         # Initialize
         self.apply(self._init_weights)
@@ -292,7 +346,7 @@ class TemporalEigenstateNetwork(nn.Module):
     
     def forward(
         self, 
-        tokens: torch.Tensor,
+        x: torch.Tensor,
         states: Optional[List] = None,
         return_states: bool = False
     ) -> torch.Tensor:
@@ -300,18 +354,24 @@ class TemporalEigenstateNetwork(nn.Module):
         Forward pass.
         
         Args:
-            tokens: Input token indices (batch, seq_len)
+            x: Input tensor. Either:
+               - Token indices (batch, seq_len) if model has embedding layer
+               - Continuous features (batch, seq_len, dim) otherwise
             states: Optional previous states for recurrent inference
             return_states: Whether to return final states
             
         Returns:
-            logits: (batch, seq_len, vocab_size)
+            output: (batch, seq_len, dim) or (batch, seq_len, vocab_size) if has output layer
             states: (optional) Final states if return_states=True
         """
-        batch, seq_len = tokens.shape
-        
-        # Embed tokens
-        x = self.token_emb(tokens)  # (batch, seq_len, dim)
+        # Handle both token indices and continuous inputs
+        if self.token_emb is not None and x.dim() == 2:
+            # Token indices input
+            batch, seq_len = x.shape
+            x = self.token_emb(x)  # (batch, seq_len, dim)
+        else:
+            # Continuous input
+            batch, seq_len, _ = x.shape
         
         # Add positional embeddings
         x = x + self.pos_emb[:, :seq_len, :]
@@ -329,12 +389,13 @@ class TemporalEigenstateNetwork(nn.Module):
         # Final norm
         x = self.norm(x)
         
-        # Project to vocabulary
-        logits = self.output(x)  # (batch, seq_len, vocab_size)
+        # Project to vocabulary if output layer exists
+        if hasattr(self, 'output') and self.output is not None:
+            x = self.output(x)  # (batch, seq_len, vocab_size)
         
         if return_states:
-            return logits, new_states
-        return logits
+            return x, new_states
+        return x
     
     @torch.no_grad()
     def generate(

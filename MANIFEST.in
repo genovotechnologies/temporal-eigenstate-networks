@@ -1,0 +1,25 @@
+# Include important files
+include README.md
+include LICENSE
+include requirements.txt
+include pyproject.toml
+
+# Include documentation
+recursive-include docs *.md
+
+# Exclude unnecessary files
+exclude .gitignore
+exclude .pre-commit-config.yaml
+
+# Exclude directories
+recursive-exclude tests *
+recursive-exclude examples *
+recursive-exclude scripts *
+recursive-exclude paper *
+recursive-exclude .git *
+recursive-exclude __pycache__ *
+recursive-exclude *.pyc
+
+# Include package data
+recursive-include src *.py
+recursive-include src py.typed

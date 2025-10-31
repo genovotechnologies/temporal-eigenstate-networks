@@ -42,6 +42,7 @@ Temporal Eigenstate Networks (TEN) is a novel neural architecture that achieves 
 - [Theoretical Foundation](#-theoretical-foundation)
 - [Usage Examples](#-usage-examples)
 - [Benchmarks](#-benchmarks)
+- [Documentation](#-documentation)
 - [Project Structure](#-project-structure)
 - [Paper & Citation](#-paper--citation)
 - [Contributing](#-contributing)
@@ -340,13 +341,32 @@ Generates publication-quality figures:
 
 ---
 
-## 📁 Project Structure
+---
+
+## � Documentation
+
+For detailed documentation, see the [`docs/`](docs/) folder:
+
+- **[Installation Guide](docs/INSTALLATION.md)** - Complete guide for installing and packaging TEN as a module for your applications
+- **[Architecture Evaluation](docs/ARCHITECTURE_EVALUATION.md)** - Comprehensive technical analysis and evaluation (Score: 9.2/10)
+- **[Confidentiality Notice](docs/CONFIDENTIALITY.md)** - Proprietary information and usage restrictions
+- **[Security Policy](docs/SECURITY.md)** - Security guidelines and vulnerability reporting
+
+---
+
+## �📁 Project Structure
 
 ```
 temporal-eigenstate-networks/
 ├── README.md                          # This file
 ├── requirements.txt                   # Python dependencies
 ├── setup.py                          # Package installation
+├── docs/                             # Documentation folder
+│   ├── README.md                     # Documentation index
+│   ├── INSTALLATION.md               # Installation & packaging guide
+│   ├── ARCHITECTURE_EVALUATION.md    # Technical evaluation
+│   ├── CONFIDENTIALITY.md            # Confidentiality notice
+│   └── SECURITY.md                   # Security policy
 ├── paper/
 │   ├── paper.tex                     # Research paper (LaTeX)
 │   ├── paper.pdf                     # Compiled PDF
