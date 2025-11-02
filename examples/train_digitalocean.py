@@ -15,7 +15,7 @@ Usage:
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torch.cuda.amp import autocast, GradScaler
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -27,9 +27,50 @@ from pathlib import Path
 from tqdm import tqdm
 import json
 
+# Enable cuDNN benchmarking for faster training
+torch.backends.cudnn.benchmark = True
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from model import TemporalEigenstateConfig, TemporalEigenstateNetwork
+
+
+# Fast pre-tokenized dataset loader
+class PreTokenizedDataset(Dataset):
+    """Fast dataset loader for pre-tokenized and packed chunks"""
+    
+    def __init__(self, chunks_dir, load_to_ram=True):
+        self.chunks_dir = Path(chunks_dir)
+        self.chunk_files = sorted(self.chunks_dir.glob("chunk_*.pt"))
+        self.load_to_ram = load_to_ram
+        
+        if not self.chunk_files:
+            raise ValueError(f"No chunks found in {chunks_dir}")
+        
+        # Load metadata
+        with open(self.chunks_dir / "metadata.json") as f:
+            self.metadata = json.load(f)
+        
+        print(f"  Found {len(self.chunk_files)} pre-tokenized chunks")
+        print(f"  Chunk size: {self.metadata['chunk_size']:,} tokens")
+        print(f"  Total tokens: {self.metadata['total_tokens']:,}")
+        
+        # Optionally load all chunks to RAM for maximum speed
+        if load_to_ram:
+            print(f"  Loading chunks to RAM...")
+            self.chunks = [torch.load(f) for f in tqdm(self.chunk_files, desc="Loading")]
+            print(f"  ✓ All chunks loaded to RAM")
+        else:
+            self.chunks = None
+    
+    def __len__(self):
+        return len(self.chunk_files)
+    
+    def __getitem__(self, idx):
+        if self.chunks is not None:
+            return self.chunks[idx]
+        else:
+            return torch.load(self.chunk_files[idx])
 
 
 # Predefined configurations optimized for 48GB GPU
@@ -299,50 +340,163 @@ class DigitalOceanTrainer:
         # Create model
         model = self.create_model()
         
-        # Prepare data
-        dataset, tokenizer, num_classes = self.prepare_data()
+        # Try to compile model for extra speed (PyTorch 2.x)
+        try:
+            print(f"\n🔥 Attempting torch.compile() for extra speed...")
+            model = torch.compile(model)
+            print(f"  ✓ Model compiled successfully!")
+        except Exception as e:
+            print(f"  ⚠️  torch.compile() skipped: {e}")
+        
+        # Check if using pre-tokenized data
+        if self.args.pretokenized:
+            print(f"\n⚡ FAST MODE: Using pre-tokenized data!")
+            tokenized_dir = Path(self.args.tokenized_dir or f"/root/ten_workspace/tokenized/{self.args.dataset}")
+            
+            if not tokenized_dir.exists():
+                print(f"\n❌ ERROR: Pre-tokenized data not found at {tokenized_dir}")
+                print(f"\nRun this first:")
+                print(f"  python3 scripts/pretokenize_and_pack.py --dataset {self.args.dataset} --chunk_size {self.config['max_seq_len']}")
+                return
+            
+            # Load pre-tokenized dataset
+            dataset = PreTokenizedDataset(tokenized_dir, load_to_ram=True)
+            
+            # Load metadata for tokenizer info
+            with open(tokenized_dir / "metadata.json") as f:
+                metadata = json.load(f)
+            
+            # Create simple tokenizer wrapper for vocab info
+            class TokenizerMock:
+                def __init__(self, metadata):
+                    self.pad_token_id = metadata.get('pad_token_id')
+                    self.eos_token_id = metadata.get('eos_token_id')
+            
+            tokenizer = TokenizerMock(metadata)
+            
+            # Create optimized DataLoader
+            train_loader = DataLoader(
+                dataset,
+                batch_size=self.config['batch_size'],
+                shuffle=True,
+                num_workers=self.args.num_workers,
+                pin_memory=True,
+                persistent_workers=True if self.args.num_workers > 0 else False,
+                prefetch_factor=4 if self.args.num_workers > 0 else None
+            )
+            
+            print(f"  ✓ Pre-tokenized data loaded: {len(dataset):,} chunks")
+            print(f"  ✓ Fast DataLoader configured ({self.args.num_workers} workers)")
+            
+        else:
+            # Standard tokenization path (slower)
+            print(f"\n⚠️  SLOW MODE: Tokenizing during training")
+            print(f"  Consider pre-tokenizing for 5-50× speedup:")
+            print(f"    python3 scripts/pretokenize_and_pack.py --dataset {self.args.dataset}")
+            
+            dataset, tokenizer, num_classes = self.prepare_data()
+        
+            # If dry run requested, run a quick forward pass and exit
+            if self.args.dry_run:
+                print("\n⚡ Dry run: running a single forward pass with a small batch...")
 
-        # If dry run requested, run a quick forward pass and exit
-        if self.args.dry_run:
-            print("\n⚡ Dry run: running a single forward pass with a small batch...")
+                # Find a textual field in the dataset examples
+                sample_example = dataset['train'][0]
+                text_field = None
+                for k, v in sample_example.items():
+                    if isinstance(v, str):
+                        text_field = k
+                        break
 
-            # Find a textual field in the dataset examples
-            sample_example = dataset['train'][0]
-            text_field = None
-            for k, v in sample_example.items():
-                if isinstance(v, str):
-                    text_field = k
-                    break
+                if text_field is None:
+                    raise RuntimeError("No textual field found in dataset for dry run")
 
-            if text_field is None:
-                raise RuntimeError("No textual field found in dataset for dry run")
+                n = max(1, min(self.args.dry_samples, len(dataset['train'])))
+                texts = [dataset['train'][i][text_field] for i in range(n)]
 
-            n = max(1, min(self.args.dry_samples, len(dataset['train'])))
-            texts = [dataset['train'][i][text_field] for i in range(n)]
+                # Tokenize to model max length
+                max_len = self.config.get('max_seq_len', 1024)
+                tokenized = tokenizer(texts, padding='max_length', truncation=True, max_length=max_len, return_tensors='pt')
+                input_ids = tokenized['input_ids'].to(self.device)
 
-            # Tokenize to model max length
-            max_len = self.config.get('max_seq_len', 1024)
-            tokenized = tokenizer(texts, padding='max_length', truncation=True, max_length=max_len, return_tensors='pt')
-            input_ids = tokenized['input_ids'].to(self.device)
+                model.eval()
+                with torch.no_grad():
+                    out = model(input_ids)
 
-            model.eval()
-            with torch.no_grad():
-                out = model(input_ids)
-
-            print(f"  ✓ Dry run forward pass successful: input {input_ids.shape} -> output {out.shape}")
-            print(f"  GPU memory (GB): {torch.cuda.max_memory_allocated() / 1024**3:.2f}")
-            return
+                print(f"  ✓ Dry run forward pass successful: input {input_ids.shape} -> output {out.shape}")
+                print(f"  GPU memory (GB): {torch.cuda.max_memory_allocated() / 1024**3:.2f}")
+                return
+            
+            # Prepare tokenized dataset for language modeling
+            def tokenize_function(examples):
+                # Find text field
+                text_field = 'text'
+                if text_field not in examples:
+                    # Try other common field names
+                    for field in ['content', 'article', 'document']:
+                        if field in examples:
+                            text_field = field
+                            break
+                
+                return tokenizer(
+                    examples[text_field],
+                    truncation=True,
+                    max_length=self.config['max_seq_len'],
+                    padding='max_length',
+                    return_tensors='pt'
+                )
+            
+            print("\n📝 Tokenizing dataset...")
+            tokenized_train = dataset['train'].map(
+                tokenize_function,
+                batched=True,
+                remove_columns=dataset['train'].column_names,
+                desc="Tokenizing train"
+            )
+            tokenized_train.set_format('torch')
+            
+            # Create data loader
+            train_loader = DataLoader(
+                tokenized_train,
+                batch_size=self.config['batch_size'],
+                shuffle=True,
+                num_workers=self.args.num_workers,
+                pin_memory=True,
+                persistent_workers=True if self.args.num_workers > 0 else False
+            )
+            
+            print(f"  ✓ Data loader ready ({len(train_loader)} batches per epoch)")
         
         # Setup training
         print(f"\n⚙️  Setting up training...")
         
-        # Optimizer
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=self.args.learning_rate,
-            weight_decay=self.args.weight_decay,
-            betas=(0.9, 0.999)
-        )
+        # Use 8-bit optimizer if requested for memory efficiency
+        if self.args.use_8bit_optim:
+            try:
+                from bitsandbytes.optim import AdamW8bit
+                optimizer = AdamW8bit(
+                    model.parameters(),
+                    lr=self.args.learning_rate,
+                    weight_decay=self.args.weight_decay,
+                    betas=(0.9, 0.999)
+                )
+                print(f"  ✓ Using 8-bit AdamW optimizer (bitsandbytes)")
+            except ImportError:
+                print(f"  ⚠️  bitsandbytes not installed, using standard AdamW")
+                print(f"     Install with: pip install bitsandbytes")
+                optimizer = torch.optim.AdamW(
+                    model.parameters(),
+                    lr=self.args.learning_rate,
+                    weight_decay=self.args.weight_decay,
+                    betas=(0.9, 0.999)
+                )
+        else:
+            optimizer = torch.optim.AdamW(
+                model.parameters(),
+                lr=self.args.learning_rate,
+                weight_decay=self.args.weight_decay,
+                betas=(0.9, 0.999)
+            )
         
         # Mixed precision
         use_amp = self.args.mixed_precision
@@ -350,58 +504,21 @@ class DigitalOceanTrainer:
         print(f"  Mixed precision: {'Enabled' if use_amp else 'Disabled'}")
         
         # Scheduler
-        total_steps = (len(dataset['train']) // self.config['batch_size']) * self.args.epochs
+        total_steps = len(train_loader) * self.args.epochs
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_steps)
         
-        print(f"  Optimizer: AdamW (lr={self.args.learning_rate})")
+        print(f"  Optimizer: {'AdamW8bit' if self.args.use_8bit_optim else 'AdamW'} (lr={self.args.learning_rate})")
         print(f"  Batch size: {self.config['batch_size']}")
         print(f"  Gradient accumulation: {self.args.gradient_accumulation}")
+        print(f"  DataLoader workers: {self.args.num_workers}")
         print(f"  Epochs: {self.args.epochs}")
         print(f"  Total steps: {total_steps:,}")
+        print(f"  Batches per epoch: {len(train_loader):,}")
         
         # Training info
         print(f"\n🚀 Starting training...")
         print(f"  Expected time: {CONFIGS[self.args.config]['description']}")
         self.print_cost()
-        
-        # Prepare tokenized dataset for language modeling
-        def tokenize_function(examples):
-            # Find text field
-            text_field = 'text'
-            if text_field not in examples:
-                # Try other common field names
-                for field in ['content', 'article', 'document']:
-                    if field in examples:
-                        text_field = field
-                        break
-            
-            return tokenizer(
-                examples[text_field],
-                truncation=True,
-                max_length=self.config['max_seq_len'],
-                padding='max_length',
-                return_tensors='pt'
-            )
-        
-        print("\n📝 Tokenizing dataset...")
-        tokenized_train = dataset['train'].map(
-            tokenize_function,
-            batched=True,
-            remove_columns=dataset['train'].column_names,
-            desc="Tokenizing train"
-        )
-        tokenized_train.set_format('torch')
-        
-        # Create data loader
-        train_loader = DataLoader(
-            tokenized_train,
-            batch_size=self.config['batch_size'],
-            shuffle=True,
-            num_workers=2,
-            pin_memory=True
-        )
-        
-        print(f"  ✓ Data loader ready ({len(train_loader)} batches per epoch)")
         
         # Training loop
         model.train()
@@ -419,7 +536,13 @@ class DigitalOceanTrainer:
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
             
             for batch_idx, batch in enumerate(progress_bar):
-                input_ids = batch['input_ids'].to(self.device)
+                # Handle both pre-tokenized and regular data
+                if self.args.pretokenized:
+                    # Pre-tokenized: batch is already input_ids tensor
+                    input_ids = batch.to(self.device)
+                else:
+                    # Regular: batch is dict with 'input_ids' key
+                    input_ids = batch['input_ids'].to(self.device)
                 
                 # Create labels for language modeling (predict next token)
                 # Shift by one: input=[0,1,2,3], label=[1,2,3,PAD]
@@ -550,6 +673,16 @@ def main():
                        help="Override max sequence length")
     parser.add_argument("--save_steps", type=int, default=1000,
                        help="Save checkpoint every N steps")
+    
+    # Speed optimizations
+    parser.add_argument("--pretokenized", action="store_true",
+                       help="Use pre-tokenized data (5-50× faster!)")
+    parser.add_argument("--tokenized_dir", type=str, default=None,
+                       help="Directory with pre-tokenized chunks (default: /root/ten_workspace/tokenized/{dataset})")
+    parser.add_argument("--num_workers", type=int, default=8,
+                       help="DataLoader workers (default: 8, set to 0 to disable)")
+    parser.add_argument("--use_8bit_optim", action="store_true",
+                       help="Use 8-bit AdamW optimizer (requires bitsandbytes)")
 
     # Dry-run and tokenizer options
     parser.add_argument("--dry_run", action="store_true",
