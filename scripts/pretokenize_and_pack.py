@@ -16,6 +16,7 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 import json
+import shutil
 
 def main():
     parser = argparse.ArgumentParser(description="Pre-tokenize and pack datasets")
@@ -34,8 +35,35 @@ def main():
                        help="Output directory for tokenized chunks")
     parser.add_argument("--max_chunks", type=int, default=0,
                        help="Maximum number of chunks to create (0=unlimited)")
+    parser.add_argument("--force", action="store_true",
+                       help="Force re-tokenization (delete existing output and cache)")
     
     args = parser.parse_args()
+    
+    # Setup output directory
+    outdir = Path(args.output_dir) / args.dataset
+    
+    # Clean up existing files if --force or if output directory exists
+    if outdir.exists():
+        if args.force:
+            print(f"\n🗑️  --force flag: Deleting existing output directory...")
+            shutil.rmtree(outdir)
+            print(f"  ✓ Deleted: {outdir}")
+        else:
+            print(f"\n⚠️  WARNING: Output directory already exists: {outdir}")
+            print(f"  Found existing tokenized data - this may slow down tokenization!")
+            print(f"  To force fresh tokenization, use --force flag:")
+            print(f"    python3 {__file__} --dataset {args.dataset} --force")
+            response = input("\n  Continue anyway? [y/N]: ")
+            if response.lower() != 'y':
+                print("  Aborted.")
+                return
+            print(f"\n  Cleaning up old chunks...")
+            shutil.rmtree(outdir)
+            print(f"  ✓ Deleted old files")
+    
+    # Create fresh output directory
+    outdir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
     print("🚀 PRE-TOKENIZATION AND PACKING")
@@ -46,6 +74,7 @@ def main():
     print(f"Parallel processes: {args.num_proc}")
     print(f"Batch size: {args.batch_size}")
     print(f"Output: {args.output_dir}")
+    print(f"Force clean: {args.force}")
     print("=" * 80)
     
     # Load tokenizer
@@ -74,6 +103,7 @@ def main():
     
     # Tokenize in parallel
     print(f"\n⚡ Tokenizing with {args.num_proc} parallel processes...")
+    print(f"  Note: Disabling cache to ensure fresh tokenization...")
     
     def tokenize_batch(batch):
         # Find text field
@@ -91,13 +121,16 @@ def main():
             return_token_type_ids=False
         )
     
+    # Disable caching to avoid slowdowns from old cache files
     ds_tokenized = ds.map(
         tokenize_batch,
         batched=True,
         batch_size=args.batch_size,
         num_proc=args.num_proc,
         remove_columns=ds.column_names,
-        desc="Tokenizing"
+        desc="Tokenizing",
+        load_from_cache_file=False,  # CRITICAL: Disable cache to maintain speed!
+        keep_in_memory=False  # Stream to disk to avoid RAM issues
     )
     
     print(f"  ✓ Tokenization complete!")
@@ -114,8 +147,6 @@ def main():
     
     # Pack into fixed-length chunks
     print(f"\n📦 Packing into {args.chunk_size}-token chunks...")
-    outdir = Path(args.output_dir) / args.dataset
-    outdir.mkdir(parents=True, exist_ok=True)
     
     chunks_created = 0
     chunks_to_create = args.max_chunks if args.max_chunks > 0 else float('inf')
