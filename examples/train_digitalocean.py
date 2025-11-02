@@ -364,12 +364,157 @@ class DigitalOceanTrainer:
         print(f"  Expected time: {CONFIGS[self.args.config]['description']}")
         self.print_cost()
         
-        # Training loop would go here
-        # For now, just show the setup
+        # Prepare tokenized dataset for language modeling
+        def tokenize_function(examples):
+            # Find text field
+            text_field = 'text'
+            if text_field not in examples:
+                # Try other common field names
+                for field in ['content', 'article', 'document']:
+                    if field in examples:
+                        text_field = field
+                        break
+            
+            return tokenizer(
+                examples[text_field],
+                truncation=True,
+                max_length=self.config['max_seq_len'],
+                padding='max_length',
+                return_tensors='pt'
+            )
         
-        print(f"\n✓ Setup complete! Ready to train.")
-        print(f"\nTo start training, uncomment the training loop in this script.")
+        print("\n📝 Tokenizing dataset...")
+        tokenized_train = dataset['train'].map(
+            tokenize_function,
+            batched=True,
+            remove_columns=dataset['train'].column_names,
+            desc="Tokenizing train"
+        )
+        tokenized_train.set_format('torch')
         
+        # Create data loader
+        train_loader = DataLoader(
+            tokenized_train,
+            batch_size=self.config['batch_size'],
+            shuffle=True,
+            num_workers=2,
+            pin_memory=True
+        )
+        
+        print(f"  ✓ Data loader ready ({len(train_loader)} batches per epoch)")
+        
+        # Training loop
+        model.train()
+        global_step = 0
+        best_loss = float('inf')
+        
+        for epoch in range(self.args.epochs):
+            print(f"\n{'='*80}")
+            print(f"Epoch {epoch + 1}/{self.args.epochs}")
+            print(f"{'='*80}")
+            
+            epoch_loss = 0
+            optimizer.zero_grad()
+            
+            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
+            
+            for batch_idx, batch in enumerate(progress_bar):
+                input_ids = batch['input_ids'].to(self.device)
+                
+                # Create labels for language modeling (predict next token)
+                # Shift by one: input=[0,1,2,3], label=[1,2,3,PAD]
+                labels = input_ids[:, 1:].contiguous()
+                inputs = input_ids[:, :-1].contiguous()
+                
+                # Forward pass
+                if use_amp:
+                    with autocast('cuda'):
+                        outputs = model(inputs)
+                        # outputs shape: (batch, seq_len-1, vocab_size)
+                        loss = nn.functional.cross_entropy(
+                            outputs.reshape(-1, outputs.size(-1)),
+                            labels.reshape(-1),
+                            ignore_index=tokenizer.pad_token_id if tokenizer.pad_token_id else -100
+                        )
+                        loss = loss / self.args.gradient_accumulation
+                    
+                    scaler.scale(loss).backward()
+                else:
+                    outputs = model(inputs)
+                    loss = nn.functional.cross_entropy(
+                        outputs.reshape(-1, outputs.size(-1)),
+                        labels.reshape(-1),
+                        ignore_index=tokenizer.pad_token_id if tokenizer.pad_token_id else -100
+                    )
+                    loss = loss / self.args.gradient_accumulation
+                    loss.backward()
+                
+                epoch_loss += loss.item() * self.args.gradient_accumulation
+                
+                # Gradient accumulation
+                if (batch_idx + 1) % self.args.gradient_accumulation == 0:
+                    if use_amp:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    
+                    scheduler.step()
+                    optimizer.zero_grad()
+                    global_step += 1
+                
+                # Update progress bar
+                progress_bar.set_postfix({
+                    'loss': f'{loss.item() * self.args.gradient_accumulation:.4f}',
+                    'lr': f'{scheduler.get_last_lr()[0]:.2e}'
+                })
+                
+                # Save checkpoint
+                if global_step > 0 and global_step % self.args.save_steps == 0:
+                    checkpoint_path = self.output_dir / "checkpoints" / f"checkpoint-{global_step}.pt"
+                    torch.save({
+                        'step': global_step,
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'loss': loss.item(),
+                    }, checkpoint_path)
+                    print(f"\n💾 Checkpoint saved: {checkpoint_path}")
+            
+            # Epoch summary
+            avg_loss = epoch_loss / len(train_loader)
+            print(f"\n📊 Epoch {epoch + 1} Summary:")
+            print(f"  Average loss: {avg_loss:.4f}")
+            self.print_cost()
+            
+            # Save best model
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                best_path = self.output_dir / "checkpoints" / "best_model.pt"
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'loss': best_loss,
+                    'config': self.config,
+                }, best_path)
+                print(f"  ⭐ New best model saved: {best_path}")
+        
+        # Final save
+        final_path = self.output_dir / "checkpoints" / "final_model.pt"
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'config': self.config,
+            'total_steps': global_step,
+        }, final_path)
+        
+        print(f"\n{'='*80}")
+        print(f"✅ Training Complete!")
+        print(f"{'='*80}")
+        print(f"  Total steps: {global_step}")
+        print(f"  Final loss: {avg_loss:.4f}")
+        print(f"  Best loss: {best_loss:.4f}")
+        print(f"  Model saved: {final_path}")
         self.print_cost()
 
 
@@ -397,12 +542,14 @@ def main():
                        help="Use mixed precision training (faster)")
     
     # Data parameters
-    parser.add_argument("--vocab_size", type=int, default=30522,
-                       help="Vocabulary size")
+    parser.add_argument("--vocab_size", type=int, default=50257,
+                       help="Vocabulary size (50257 for GPT-2, 30522 for BERT)")
     parser.add_argument("--subset_size", type=int, default=0,
                        help="Use dataset subset (0 = full dataset)")
     parser.add_argument("--max_seq_len", type=int, default=None,
                        help="Override max sequence length")
+    parser.add_argument("--save_steps", type=int, default=1000,
+                       help="Save checkpoint every N steps")
 
     # Dry-run and tokenizer options
     parser.add_argument("--dry_run", action="store_true",
