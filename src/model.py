@@ -599,6 +599,577 @@ class HierarchicalTEN(nn.Module):
         # Output
         logits = self.output(x)
         return logits
+    
+    @torch.no_grad()
+    def generate(
+        self,
+        prompt: torch.Tensor,
+        max_new_tokens: int = 100,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None
+    ) -> torch.Tensor:
+        """
+        Generate text autoregressively.
+        
+        Note: HierarchicalTEN doesn't maintain recurrent state like base TEN,
+        so generation is less efficient but still works.
+        
+        Args:
+            prompt: Initial token indices (batch, prompt_len)
+            max_new_tokens: How many tokens to generate
+            temperature: Sampling temperature
+            top_k: Optional top-k filtering
+            top_p: Optional nucleus sampling
+            
+        Returns:
+            Generated sequence (batch, prompt_len + max_new_tokens)
+        """
+        self.eval()
+        
+        current_tokens = prompt
+        
+        for _ in range(max_new_tokens):
+            # Forward pass (need to process full sequence each time)
+            logits = self.forward(current_tokens)
+            
+            # Get logits for last position
+            logits = logits[:, -1, :] / temperature
+            
+            # Optional top-k filtering
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            
+            # Optional nucleus (top-p) sampling
+            if top_p is not None:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+                sorted_indices_to_remove[:, 0] = 0
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = -float('Inf')
+            
+            # Sample
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Append
+            current_tokens = torch.cat([current_tokens, next_token], dim=1)
+        
+        return current_tokens
+    
+    def count_parameters(self) -> int:
+        """Count total trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+# ============================================================================
+# Task-Specific TEN Models
+# ============================================================================
+
+class TEN_Encoder(nn.Module):
+    """
+    TEN Encoder for tasks requiring only encoding (e.g., classification, regression).
+    
+    Processes input sequences and outputs fixed-size representations or per-token features.
+    Useful for: text classification, sequence labeling, feature extraction.
+    
+    Args:
+        input_dim: Input feature dimension (or vocab_size if using embeddings)
+        d_model: Hidden dimension
+        num_layers: Number of TEN blocks
+        num_eigenstates: Number of eigenstates per block
+        num_classes: Number of output classes (for classification)
+        task_type: 'classification', 'sequence_labeling', or 'regression'
+        pooling: Pooling strategy ('mean', 'max', 'last', 'cls')
+        use_embeddings: Whether to use embedding layer (for discrete inputs)
+        max_seq_len: Maximum sequence length
+        dropout: Dropout rate
+    """
+    def __init__(
+        self,
+        input_dim: int,
+        d_model: int = 512,
+        num_layers: int = 6,
+        num_eigenstates: int = 64,
+        num_classes: int = 2,
+        task_type: str = 'classification',
+        pooling: str = 'mean',
+        use_embeddings: bool = False,
+        max_seq_len: int = 512,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        
+        self.task_type = task_type
+        self.pooling = pooling
+        self.d_model = d_model
+        
+        # Input projection
+        if use_embeddings:
+            self.input_proj = nn.Embedding(input_dim, d_model)
+        else:
+            self.input_proj = nn.Linear(input_dim, d_model)
+        
+        # Positional embeddings
+        self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, d_model) * 0.02)
+        
+        # TEN blocks
+        self.blocks = nn.ModuleList([
+            ResonanceBlock(d_model, num_cells=4, num_eigenstates=num_eigenstates, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        
+        # Final norm
+        self.norm = nn.LayerNorm(d_model)
+        
+        # Task-specific heads
+        if task_type == 'classification':
+            self.output_head = nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model // 2, num_classes)
+            )
+        elif task_type == 'sequence_labeling':
+            self.output_head = nn.Linear(d_model, num_classes)
+        elif task_type == 'regression':
+            self.output_head = nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model // 2, 1)
+            )
+        else:
+            raise ValueError(f"Unknown task_type: {task_type}")
+        
+        # CLS token (for 'cls' pooling)
+        if pooling == 'cls':
+            self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if hasattr(module, 'bias') and module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.ones_(module.weight)
+            torch.nn.init.zeros_(module.bias)
+    
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Forward pass.
+        
+        Args:
+            x: Input tensor (batch, seq_len) or (batch, seq_len, input_dim)
+            mask: Optional attention mask (batch, seq_len)
+            
+        Returns:
+            output: Task-specific output
+                - classification: (batch, num_classes)
+                - sequence_labeling: (batch, seq_len, num_classes)
+                - regression: (batch, 1)
+        """
+        batch_size = x.shape[0]
+        
+        # Input projection
+        if x.dim() == 2:
+            x = self.input_proj(x)  # Embedding layer
+        else:
+            x = self.input_proj(x)  # Linear projection
+        
+        seq_len = x.shape[1]
+        
+        # Add CLS token if needed
+        if self.pooling == 'cls':
+            cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+            x = torch.cat([cls_tokens, x], dim=1)
+            seq_len += 1
+        
+        # Add positional embeddings
+        x = x + self.pos_emb[:, :seq_len, :]
+        
+        # Pass through TEN blocks
+        states = [[None] * len(block.cells) for block in self.blocks]
+        for block, block_states in zip(self.blocks, states):
+            x, _ = block(x, block_states)
+        
+        # Final norm
+        x = self.norm(x)
+        
+        # Task-specific processing
+        if self.task_type == 'sequence_labeling':
+            # Per-token predictions
+            if self.pooling == 'cls':
+                x = x[:, 1:, :]  # Remove CLS token
+            output = self.output_head(x)
+        else:
+            # Pooling for classification/regression
+            if self.pooling == 'cls':
+                pooled = x[:, 0]  # CLS token
+            elif self.pooling == 'mean':
+                if mask is not None:
+                    mask_expanded = mask.unsqueeze(-1).float()
+                    pooled = (x * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1)
+                else:
+                    pooled = x.mean(dim=1)
+            elif self.pooling == 'max':
+                pooled = x.max(dim=1)[0]
+            elif self.pooling == 'last':
+                pooled = x[:, -1]
+            else:
+                raise ValueError(f"Unknown pooling: {self.pooling}")
+            
+            output = self.output_head(pooled)
+        
+        return output
+    
+    def count_parameters(self) -> int:
+        """Count total trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class TEN_TimeSeries(nn.Module):
+    """
+    TEN for time series forecasting and prediction.
+    
+    Specialized for temporal prediction tasks like stock prices, weather, sensor data.
+    
+    Args:
+        input_dim: Number of input features
+        d_model: Hidden dimension
+        num_layers: Number of TEN blocks
+        num_eigenstates: Number of eigenstates
+        forecast_horizon: Number of timesteps to forecast
+        output_dim: Number of output features (defaults to input_dim)
+        max_seq_len: Maximum input sequence length
+        dropout: Dropout rate
+    """
+    def __init__(
+        self,
+        input_dim: int,
+        d_model: int = 256,
+        num_layers: int = 4,
+        num_eigenstates: int = 64,
+        forecast_horizon: int = 1,
+        output_dim: Optional[int] = None,
+        max_seq_len: int = 512,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.output_dim = output_dim or input_dim
+        self.forecast_horizon = forecast_horizon
+        
+        # Input projection
+        self.input_proj = nn.Linear(input_dim, d_model)
+        
+        # Positional embeddings
+        self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, d_model) * 0.02)
+        
+        # TEN blocks
+        self.blocks = nn.ModuleList([
+            ResonanceBlock(d_model, num_cells=4, num_eigenstates=num_eigenstates, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        
+        # Norm
+        self.norm = nn.LayerNorm(d_model)
+        
+        # Forecasting head
+        self.forecast_head = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 2, forecast_horizon * self.output_dim)
+        )
+        
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.ones_(module.weight)
+            torch.nn.init.zeros_(module.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass.
+        
+        Args:
+            x: Input time series (batch, seq_len, input_dim)
+            
+        Returns:
+            forecast: (batch, forecast_horizon, output_dim)
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Project input
+        x = self.input_proj(x)
+        x = x + self.pos_emb[:, :seq_len, :]
+        
+        # Pass through blocks
+        states = [[None] * len(block.cells) for block in self.blocks]
+        for block, block_states in zip(self.blocks, states):
+            x, _ = block(x, block_states)
+        
+        # Use last hidden state for forecasting
+        x = self.norm(x[:, -1])  # (batch, d_model)
+        
+        # Generate forecast
+        forecast = self.forecast_head(x)  # (batch, forecast_horizon * output_dim)
+        forecast = forecast.view(batch_size, self.forecast_horizon, self.output_dim)
+        
+        return forecast
+    
+    def count_parameters(self) -> int:
+        """Count total trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class TEN_MultiModal(nn.Module):
+    """
+    Multi-Modal Temporal Eigenstate Network.
+    
+    Combines multiple modalities (text, vision, audio, etc.) using TEN architecture.
+    Each modality gets its own encoder, then features are fused using cross-modal attention.
+    
+    Args:
+        modality_configs: Dict mapping modality names to their configurations
+            Each config should contain: {'input_dim', 'd_model', 'input_type'}
+        fusion_dim: Dimension for fusion layer
+        num_fusion_layers: Number of cross-modal fusion layers
+        num_eigenstates: Number of eigenstates per modality encoder
+        num_classes: Number of output classes (if doing classification)
+        task_type: 'classification', 'generation', or 'retrieval'
+        max_seq_len: Maximum sequence length per modality
+        dropout: Dropout rate
+    """
+    def __init__(
+        self,
+        modality_configs: dict,
+        fusion_dim: int = 512,
+        num_fusion_layers: int = 2,
+        num_eigenstates: int = 64,
+        num_classes: Optional[int] = None,
+        task_type: str = 'classification',
+        max_seq_len: int = 512,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        
+        self.modality_names = list(modality_configs.keys())
+        self.task_type = task_type
+        self.fusion_dim = fusion_dim
+        
+        # Create encoders for each modality
+        self.modality_encoders = nn.ModuleDict()
+        self.modality_projections = nn.ModuleDict()
+        
+        for modality_name, config in modality_configs.items():
+            input_dim = config['input_dim']
+            d_model = config.get('d_model', fusion_dim)
+            input_type = config.get('input_type', 'continuous')  # 'continuous' or 'discrete'
+            
+            # Input processing
+            if input_type == 'discrete':
+                self.modality_encoders[modality_name] = nn.Embedding(input_dim, d_model)
+            else:
+                self.modality_encoders[modality_name] = nn.Linear(input_dim, d_model)
+            
+            # TEN blocks for this modality
+            setattr(self, f'{modality_name}_blocks', nn.ModuleList([
+                ResonanceBlock(d_model, num_cells=4, num_eigenstates=num_eigenstates // 2, dropout=dropout)
+                for _ in range(2)  # 2 layers per modality
+            ]))
+            
+            # Projection to fusion dimension
+            if d_model != fusion_dim:
+                self.modality_projections[modality_name] = nn.Linear(d_model, fusion_dim)
+            
+            # Positional embeddings per modality
+            setattr(self, f'{modality_name}_pos_emb', 
+                   nn.Parameter(torch.randn(1, max_seq_len, d_model) * 0.02))
+        
+        # Cross-modal fusion layers
+        self.fusion_blocks = nn.ModuleList([
+            ResonanceBlock(fusion_dim, num_cells=4, num_eigenstates=num_eigenstates, dropout=dropout)
+            for _ in range(num_fusion_layers)
+        ])
+        
+        # Cross-modal attention
+        self.cross_attention = nn.ModuleList([
+            nn.MultiheadAttention(fusion_dim, num_heads=8, dropout=dropout, batch_first=True)
+            for _ in range(len(self.modality_names) - 1)
+        ])
+        
+        # Output head
+        self.norm = nn.LayerNorm(fusion_dim)
+        
+        if task_type == 'classification' and num_classes:
+            self.output_head = nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(fusion_dim // 2, num_classes)
+            )
+        elif task_type == 'generation':
+            # For generation, return the fused representation
+            self.output_head = nn.Identity()
+        elif task_type == 'retrieval':
+            # For retrieval, project to normalized embedding space
+            self.output_head = nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim)
+            )
+        
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if hasattr(module, 'bias') and module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.ones_(module.weight)
+            torch.nn.init.zeros_(module.bias)
+    
+    def encode_modality(
+        self, 
+        modality_name: str, 
+        x: torch.Tensor,
+        return_sequence: bool = False
+    ) -> torch.Tensor:
+        """
+        Encode a single modality.
+        
+        Args:
+            modality_name: Name of the modality
+            x: Input tensor (batch, seq_len, ...) or (batch, seq_len)
+            return_sequence: If True, return full sequence; else return pooled
+            
+        Returns:
+            Encoded representation
+        """
+        batch_size = x.shape[0]
+        
+        # Input encoding
+        encoder = self.modality_encoders[modality_name]
+        if x.dim() == 2:
+            h = encoder(x)  # Embedding
+        else:
+            h = encoder(x)  # Linear projection
+        
+        seq_len = h.shape[1]
+        
+        # Add positional embeddings
+        pos_emb = getattr(self, f'{modality_name}_pos_emb')
+        h = h + pos_emb[:, :seq_len, :]
+        
+        # Pass through modality-specific blocks
+        blocks = getattr(self, f'{modality_name}_blocks')
+        states = [[None] * len(block.cells) for block in blocks]
+        for block, block_states in zip(blocks, states):
+            h, _ = block(h, block_states)
+        
+        # Project to fusion dimension
+        if modality_name in self.modality_projections:
+            h = self.modality_projections[modality_name](h)
+        
+        if return_sequence:
+            return h
+        else:
+            # Mean pooling
+            return h.mean(dim=1)
+    
+    def forward(
+        self, 
+        modality_inputs: dict,
+        return_embeddings: bool = False
+    ) -> torch.Tensor:
+        """
+        Forward pass with multiple modalities.
+        
+        Args:
+            modality_inputs: Dict mapping modality names to input tensors
+            return_embeddings: If True, return fused embeddings instead of task output
+            
+        Returns:
+            Task-specific output or embeddings
+        """
+        # Encode each modality
+        modality_features = {}
+        modality_sequences = {}
+        
+        for modality_name in self.modality_names:
+            if modality_name in modality_inputs:
+                x = modality_inputs[modality_name]
+                modality_sequences[modality_name] = self.encode_modality(
+                    modality_name, x, return_sequence=True
+                )
+                modality_features[modality_name] = modality_sequences[modality_name].mean(dim=1)
+        
+        # Cross-modal attention fusion
+        modality_list = list(modality_sequences.keys())
+        if len(modality_list) >= 2:
+            # Use first modality as query, attend to others
+            fused = modality_sequences[modality_list[0]]
+            
+            for i, other_modality in enumerate(modality_list[1:]):
+                attended, _ = self.cross_attention[min(i, len(self.cross_attention)-1)](
+                    query=fused,
+                    key=modality_sequences[other_modality],
+                    value=modality_sequences[other_modality]
+                )
+                fused = fused + attended  # Residual connection
+        else:
+            # Single modality
+            fused = modality_sequences[modality_list[0]]
+        
+        # Fusion blocks
+        states = [[None] * len(block.cells) for block in self.fusion_blocks]
+        for block, block_states in zip(self.fusion_blocks, states):
+            fused, _ = block(fused, block_states)
+        
+        # Pool and normalize
+        fused = self.norm(fused.mean(dim=1))  # (batch, fusion_dim)
+        
+        if return_embeddings:
+            return fused
+        
+        # Task-specific output
+        output = self.output_head(fused)
+        
+        # Normalize for retrieval
+        if self.task_type == 'retrieval':
+            output = F.normalize(output, p=2, dim=-1)
+        
+        return output
+    
+    def compute_similarity(self, emb1: torch.Tensor, emb2: torch.Tensor) -> torch.Tensor:
+        """
+        Compute similarity between embeddings (for retrieval tasks).
+        
+        Args:
+            emb1: First embedding (batch, dim) or (dim,)
+            emb2: Second embedding (batch, dim) or (dim,)
+            
+        Returns:
+            Similarity scores
+        """
+        return F.cosine_similarity(emb1, emb2, dim=-1)
+    
+    def count_parameters(self) -> int:
+        """Count total trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 # ============================================================================
@@ -614,19 +1185,48 @@ def create_model(
     Factory function to create TEN models.
     
     Args:
-        model_type: 'ten' or 'hten'
-        vocab_size: Vocabulary size
+        model_type: Model architecture type. Options:
+            - 'ten': Standard Temporal Eigenstate Network (language modeling)
+            - 'hten': Hierarchical TEN (multi-scale language modeling)
+            - 'encoder': TEN Encoder (classification, sequence labeling, regression)
+            - 'timeseries': TEN for time series forecasting
+            - 'multimodal': Multi-modal TEN (vision+text, audio+text, etc.)
+        vocab_size: Vocabulary size (for language models)
         **kwargs: Model-specific arguments
         
     Returns:
         Initialized model
+        
+    Examples:
+        # Language model
+        model = create_model('ten', vocab_size=50000, dim=512, num_layers=6)
+        
+        # Text classifier
+        model = create_model('encoder', input_dim=50000, num_classes=3, 
+                           task_type='classification', use_embeddings=True)
+        
+        # Time series forecaster
+        model = create_model('timeseries', input_dim=10, forecast_horizon=24)
+        
+        # Multi-modal model
+        model = create_model('multimodal', 
+                           modality_configs={'text': {'input_dim': 50000, 'input_type': 'discrete'},
+                                           'image': {'input_dim': 2048, 'input_type': 'continuous'}},
+                           num_classes=10)
     """
     if model_type == 'ten':
         return TemporalEigenstateNetwork(vocab_size=vocab_size, **kwargs)
     elif model_type == 'hten':
         return HierarchicalTEN(vocab_size=vocab_size, **kwargs)
+    elif model_type == 'encoder':
+        return TEN_Encoder(**kwargs)
+    elif model_type == 'timeseries':
+        return TEN_TimeSeries(**kwargs)
+    elif model_type == 'multimodal':
+        return TEN_MultiModal(**kwargs)
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        raise ValueError(f"Unknown model type: {model_type}. "
+                        f"Available: 'ten', 'hten', 'encoder', 'timeseries', 'multimodal'")
 
 
 def count_parameters(model: nn.Module) -> dict:
