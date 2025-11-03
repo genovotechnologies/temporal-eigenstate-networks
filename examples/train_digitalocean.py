@@ -202,33 +202,58 @@ class DigitalOceanTrainer:
             raise ValueError(f"Unknown dataset: {self.args.dataset}")
 
         hf_name, hf_config = dataset_map[self.args.dataset]
-        # Load dataset (some repos expose the dataset directly by repo name)
-        if hf_config:
-            dataset = load_dataset(hf_name, hf_config)
-        else:
-            dataset = load_dataset(hf_name)
-
-        # Determine task type
-        if self.args.dataset in ("imdb", "ag_news"):
-            num_classes = 2 if self.args.dataset == "imdb" else 4
-        else:
+        
+        # Use streaming for large datasets to avoid full download
+        use_streaming = self.args.streaming or self.args.dataset in ["finewebedu", "openwebtext", "pg19"]
+        
+        if use_streaming:
+            print(f"  🌊 Using streaming mode (no full download needed)...")
+            # Load dataset in streaming mode
+            if hf_config:
+                dataset = load_dataset(hf_name, hf_config, split="train", streaming=True)
+            else:
+                dataset = load_dataset(hf_name, split="train", streaming=True)
+            
+            print(f"  ✓ Dataset streaming enabled")
+            print(f"  ⚡ Training will start immediately (no waiting for full download!)")
+            train_len = "streaming"
+            test_len = 0
             num_classes = None  # language modeling / unsupervised
+            
+            # Wrap in dict for compatibility
+            dataset = {'train': dataset}
+            
+        else:
+            # Load dataset normally (full download)
+            if hf_config:
+                dataset = load_dataset(hf_name, hf_config)
+            else:
+                dataset = load_dataset(hf_name)
 
-        print(f"  ✓ Dataset loaded")
-        # Some datasets don't have a test split
-        train_len = len(dataset['train']) if 'train' in dataset else 0
-        test_len = len(dataset['test']) if 'test' in dataset else 0
-        print(f"  Train samples: {train_len:,}")
-        print(f"  Test samples: {test_len:,}")
+            # Determine task type
+            if self.args.dataset in ("imdb", "ag_news"):
+                num_classes = 2 if self.args.dataset == "imdb" else 4
+            else:
+                num_classes = None  # language modeling / unsupervised
 
-        # Use subset if specified
-        if self.args.subset_size > 0 and train_len > 0:
-            sel = min(self.args.subset_size, train_len)
-            dataset['train'] = dataset['train'].shuffle(seed=42).select(range(sel))
-            if test_len > 0:
-                sel_test = min(self.args.subset_size // 5, test_len)
-                dataset['test'] = dataset['test'].shuffle(seed=42).select(range(sel_test))
-            print(f"  Using subset: {len(dataset['train'])} train, {len(dataset.get('test', []))} test")
+            print(f"  ✓ Dataset loaded")
+            # Some datasets don't have a test split
+            train_len = len(dataset['train']) if 'train' in dataset else 0
+            test_len = len(dataset['test']) if 'test' in dataset else 0
+        
+        print(f"  Train samples: {train_len if isinstance(train_len, str) else f'{train_len:,}'}")
+        if test_len > 0:
+            print(f"  Test samples: {test_len:,}")
+
+        # Use subset if specified (only for non-streaming)
+        if self.args.subset_size > 0 and not use_streaming:
+            if isinstance(train_len, int) and train_len > 0:
+                sel = min(self.args.subset_size, train_len)
+                dataset['train'] = dataset['train'].shuffle(seed=42).select(range(sel))
+                if test_len > 0:
+                    sel_test = min(self.args.subset_size // 5, test_len)
+                    dataset['test'] = dataset['test'].shuffle(seed=42).select(range(sel_test))
+                print(f"  Using subset: {len(dataset['train'])} train, {len(dataset.get('test', []))} test")
 
         # Load tokenizer (use GPT-2 tokenizer by default for LM tasks)
         print(f"\n🔤 Loading tokenizer...")
@@ -240,7 +265,7 @@ class DigitalOceanTrainer:
 
         print(f"  ✓ Tokenizer loaded (vocab: {len(tokenizer)})")
 
-        return dataset, tokenizer, num_classes
+        return dataset, tokenizer, num_classes, use_streaming
     
     def benchmark(self):
         """Run comprehensive benchmarks"""
@@ -340,6 +365,9 @@ class DigitalOceanTrainer:
         # Create model
         model = self.create_model()
         
+        # Track if using streaming (for later logic)
+        use_streaming = False
+        
         # Try to compile model for extra speed (PyTorch 2.x)
         try:
             print(f"\n🔥 Attempting torch.compile() for extra speed...")
@@ -394,7 +422,7 @@ class DigitalOceanTrainer:
             print(f"  Consider pre-tokenizing for 5-50× speedup:")
             print(f"    python3 scripts/pretokenize_and_pack.py --dataset {self.args.dataset}")
             
-            dataset, tokenizer, num_classes = self.prepare_data()
+            dataset, tokenizer, num_classes, use_streaming = self.prepare_data()
         
             # If dry run requested, run a quick forward pass and exit
             if self.args.dry_run:
@@ -447,25 +475,60 @@ class DigitalOceanTrainer:
                 )
             
             print("\n📝 Tokenizing dataset...")
-            tokenized_train = dataset['train'].map(
-                tokenize_function,
-                batched=True,
-                remove_columns=dataset['train'].column_names,
-                desc="Tokenizing train"
-            )
-            tokenized_train.set_format('torch')
+            
+            # Handle streaming vs regular datasets
+            if use_streaming:
+                # For streaming datasets, don't call .map() with remove_columns
+                # Just tokenize on-the-fly in the DataLoader collate_fn
+                print("  🌊 Streaming mode: tokenizing on-the-fly during training")
+                tokenized_train = dataset['train']
+                
+                # Create a custom collate function for streaming
+                def collate_fn(batch):
+                    # Find text field
+                    text_field = 'text'
+                    if text_field not in batch[0]:
+                        for field in ['content', 'article', 'document']:
+                            if field in batch[0]:
+                                text_field = field
+                                break
+                    
+                    texts = [item[text_field] for item in batch]
+                    tokenized = tokenizer(
+                        texts,
+                        truncation=True,
+                        max_length=self.config['max_seq_len'],
+                        padding='max_length',
+                        return_tensors='pt'
+                    )
+                    return tokenized
+                
+            else:
+                # Regular dataset: tokenize everything upfront
+                tokenized_train = dataset['train'].map(
+                    tokenize_function,
+                    batched=True,
+                    remove_columns=dataset['train'].column_names,
+                    desc="Tokenizing train"
+                )
+                tokenized_train.set_format('torch')
+                collate_fn = None
             
             # Create data loader
             train_loader = DataLoader(
                 tokenized_train,
                 batch_size=self.config['batch_size'],
-                shuffle=True,
-                num_workers=self.args.num_workers,
+                shuffle=not use_streaming,  # Can't shuffle streaming datasets
+                num_workers=self.args.num_workers if not use_streaming else 0,  # No workers for streaming
                 pin_memory=True,
-                persistent_workers=True if self.args.num_workers > 0 else False
+                persistent_workers=(True if self.args.num_workers > 0 and not use_streaming else False),
+                collate_fn=collate_fn
             )
             
-            print(f"  ✓ Data loader ready ({len(train_loader)} batches per epoch)")
+            if use_streaming:
+                print(f"  ✓ Streaming data loader ready (tokenizing on-the-fly)")
+            else:
+                print(f"  ✓ Data loader ready ({len(train_loader)} batches per epoch)")
         
         # Setup training
         print(f"\n⚙️  Setting up training...")
@@ -503,17 +566,23 @@ class DigitalOceanTrainer:
         scaler = GradScaler() if use_amp else None
         print(f"  Mixed precision: {'Enabled' if use_amp else 'Disabled'}")
         
-        # Scheduler
-        total_steps = len(train_loader) * self.args.epochs
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_steps)
-        
         print(f"  Optimizer: {'AdamW8bit' if self.args.use_8bit_optim else 'AdamW'} (lr={self.args.learning_rate})")
         print(f"  Batch size: {self.config['batch_size']}")
         print(f"  Gradient accumulation: {self.args.gradient_accumulation}")
-        print(f"  DataLoader workers: {self.args.num_workers}")
+        print(f"  DataLoader workers: {self.args.num_workers if not (hasattr(self, 'use_streaming') and use_streaming) else 0}")
         print(f"  Epochs: {self.args.epochs}")
-        print(f"  Total steps: {total_steps:,}")
-        print(f"  Batches per epoch: {len(train_loader):,}")
+        
+        # Calculate total steps (can't do this for streaming datasets)
+        if not (self.args.pretokenized or use_streaming):
+            total_steps = len(train_loader) * self.args.epochs
+            print(f"  Total steps: {total_steps:,}")
+            print(f"  Batches per epoch: {len(train_loader):,}")
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_steps)
+        else:
+            # For streaming/pretokenized, use a large estimate
+            total_steps = 100000  # Estimate
+            print(f"  Total steps: streaming (unknown)")
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_steps)
         
         # Training info
         print(f"\n🚀 Starting training...")
@@ -679,6 +748,8 @@ def main():
                        help="Use pre-tokenized data (5-50× faster!)")
     parser.add_argument("--tokenized_dir", type=str, default=None,
                        help="Directory with pre-tokenized chunks (default: /root/ten_workspace/tokenized/{dataset})")
+    parser.add_argument("--streaming", action="store_true",
+                       help="Use streaming mode (no full download, start training immediately)")
     parser.add_argument("--num_workers", type=int, default=8,
                        help="DataLoader workers (default: 8, set to 0 to disable)")
     parser.add_argument("--use_8bit_optim", action="store_true",
