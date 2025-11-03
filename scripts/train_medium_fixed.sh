@@ -5,13 +5,16 @@ echo "========================================"
 echo ""
 echo "✅ Architecture fixes applied:"
 echo "  - Cell averaging (not concatenation) = 4× less memory"
+echo "  - FFN expansion 2× (not 4×) = 2× less memory"
+echo "  - Gradient checkpointing = saves activation memory"
 echo "  - Preallocated tensors = no list overhead"
-echo "  - TEN now MORE efficient than transformers!"
+echo "  - Reduced batch size = lower peak memory"
 echo ""
 echo "Medium Config (should work now):"
-echo "  - 570M parameters"
+echo "  - 419M parameters (optimized)"
 echo "  - 16K context"
-echo "  - Expected VRAM: ~10-15GB (was 40GB before fix!)"
+echo "  - Batch size: 16 (was 32)"
+echo "  - Expected VRAM: ~12-18GB (was 44GB before fix!)"
 echo ""
 
 # Kill stuck processes
@@ -34,12 +37,13 @@ python3 examples/train_digitalocean.py \
   --pretokenized \
   --tokenized_dir /root/ten_workspace/tokenized/finewebedu \
   --epochs 1 \
-  --gradient_accumulation 4 \
+  --gradient_accumulation 8 \
   --save_steps 1500 \
   --num_workers 0 \
   --learning_rate 3e-4 \
   --mixed_precision \
   --no_compile \
+  --gradient_checkpointing \
   --output_dir /root/ten_workspace/runs/\$(date +%F_%H-%M) \
   2>&1 | tee /root/ten_workspace/logs/training_medium_fixed.log
 "

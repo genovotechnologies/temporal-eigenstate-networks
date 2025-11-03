@@ -133,9 +133,9 @@ CONFIGS = {
         "d_model": 1536,
         "n_layers": 16,
         "num_eigenstates": 192,
-        "batch_size": 32,
+        "batch_size": 16,  # Reduced from 32 for memory efficiency with 2× FFN
         "max_seq_len": 16384,
-        "description": "Medium - 850M params (~3 hours)",
+        "description": "Medium - 419M params (~3 hours)",
     },
     "large": {
         "d_model": 2048,
@@ -588,6 +588,11 @@ class DigitalOceanTrainer:
         # Setup training
         print(f"\n⚙️  Setting up training...")
         
+        # Enable gradient checkpointing if requested
+        if self.args.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+            print(f"  ✓ Gradient checkpointing enabled (trades compute for memory)")
+        
         # Use 8-bit optimizer if requested for memory efficiency
         if self.args.use_8bit_optim:
             try:
@@ -812,6 +817,8 @@ def main():
                        help="Use 8-bit AdamW optimizer (requires bitsandbytes)")
     parser.add_argument("--no_compile", action="store_true",
                        help="Disable torch.compile() (use if training hangs/deadlocks)")
+    parser.add_argument("--gradient_checkpointing", action="store_true",
+                       help="Enable gradient checkpointing to reduce memory (trades compute for memory)")
 
     # Dry-run and tokenizer options
     parser.add_argument("--dry_run", action="store_true",

@@ -201,12 +201,14 @@ class ResonanceBlock(nn.Module):
         # No cell_mix needed - we average outputs for memory efficiency
         # This makes TEN 4× more memory efficient than concatenation!
         
-        # Feedforward network
+        # Feedforward network - using 2× expansion instead of 4× for memory efficiency
+        # For large models: 4× expansion = OOM, 2× expansion = trainable
+        # This still provides non-linearity while being memory-friendly
         self.ffn = nn.Sequential(
-            nn.Linear(dim, dim * 4),
+            nn.Linear(dim, dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
+            nn.Linear(dim * 2, dim),
             nn.Dropout(dropout)
         )
         
@@ -309,6 +311,7 @@ class TemporalEigenstateNetwork(nn.Module):
         self.vocab_size = vocab_size
         self.dim = dim
         self.num_layers = num_layers
+        self.use_gradient_checkpointing = False  # Can be enabled to trade compute for memory
         
         # Token embeddings (only if vocab_size is provided)
         self.token_emb = nn.Embedding(vocab_size, dim) if vocab_size else None
@@ -349,6 +352,14 @@ class TemporalEigenstateNetwork(nn.Module):
             torch.nn.init.ones_(module.weight)
             torch.nn.init.zeros_(module.bias)
     
+    def gradient_checkpointing_enable(self):
+        """Enable gradient checkpointing to reduce memory at cost of compute."""
+        self.use_gradient_checkpointing = True
+    
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing."""
+        self.use_gradient_checkpointing = False
+    
     def forward(
         self, 
         x: torch.Tensor,
@@ -388,8 +399,25 @@ class TemporalEigenstateNetwork(nn.Module):
         # Pass through all blocks
         new_states = []
         for block, block_states in zip(self.blocks, states):
-            x, block_new_states = block(x, block_states)
-            new_states.append(block_new_states)
+            # Use gradient checkpointing if enabled (trades compute for memory)
+            if self.training and self.use_gradient_checkpointing:
+                # Checkpoint requires function that takes only tensors
+                def create_custom_forward(module):
+                    def custom_forward(x_in):
+                        out, _ = module(x_in, block_states)
+                        return out
+                    return custom_forward
+                x = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(block),
+                    x,
+                    use_reentrant=False
+                )
+                # Still track states but don't checkpoint them
+                _, block_new_states = block(x.detach(), block_states)
+                new_states.append(block_new_states)
+            else:
+                x, block_new_states = block(x, block_states)
+                new_states.append(block_new_states)
         
         # Final norm
         x = self.norm(x)
