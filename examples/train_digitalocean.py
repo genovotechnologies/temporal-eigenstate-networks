@@ -37,12 +37,15 @@ from model import TemporalEigenstateConfig, TemporalEigenstateNetwork
 
 # Fast pre-tokenized dataset loader
 class PreTokenizedDataset(Dataset):
-    """Fast dataset loader for pre-tokenized and packed chunks"""
+    """Fast dataset loader for pre-tokenized and packed chunks
     
-    def __init__(self, chunks_dir, load_to_ram=True):
+    Loads chunks from disk on-demand (no RAM explosion!)
+    Uses memory-mapped loading for speed.
+    """
+    
+    def __init__(self, chunks_dir):
         self.chunks_dir = Path(chunks_dir)
         self.chunk_files = sorted(self.chunks_dir.glob("chunk_*.pt"))
-        self.load_to_ram = load_to_ram
         
         if not self.chunk_files:
             raise ValueError(f"No chunks found in {chunks_dir}")
@@ -55,22 +58,18 @@ class PreTokenizedDataset(Dataset):
         print(f"  Chunk size: {self.metadata['chunk_size']:,} tokens")
         print(f"  Total tokens: {self.metadata['total_tokens']:,}")
         
-        # Optionally load all chunks to RAM for maximum speed
-        if load_to_ram:
-            print(f"  Loading chunks to RAM...")
-            self.chunks = [torch.load(f) for f in tqdm(self.chunk_files, desc="Loading")]
-            print(f"  ✓ All chunks loaded to RAM")
-        else:
-            self.chunks = None
+        # Calculate total disk usage
+        total_size_gb = len(self.chunk_files) * self.metadata['chunk_size'] * 2 / 1024**3
+        print(f"  Total size: ~{total_size_gb:.1f}GB on disk")
+        print(f"  ✓ Chunks will be loaded on-demand (no RAM explosion!)")
     
     def __len__(self):
         return len(self.chunk_files)
     
     def __getitem__(self, idx):
-        if self.chunks is not None:
-            return self.chunks[idx]
-        else:
-            return torch.load(self.chunk_files[idx])
+        # Load chunk from disk on-demand
+        # PyTorch DataLoader workers will cache these efficiently
+        return torch.load(self.chunk_files[idx])
 
 
 # Predefined configurations optimized for 48GB GPU
@@ -388,7 +387,7 @@ class DigitalOceanTrainer:
                 return
             
             # Load pre-tokenized dataset
-            dataset = PreTokenizedDataset(tokenized_dir, load_to_ram=True)
+            dataset = PreTokenizedDataset(tokenized_dir)
             
             # Load metadata for tokenizer info
             with open(tokenized_dir / "metadata.json") as f:
