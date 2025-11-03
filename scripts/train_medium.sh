@@ -1,12 +1,13 @@
 #!/bin/bash
 
-echo "🎯 Starting Training with MEDIUM CONFIG (OOM-safe)"
-echo "===================================================="
+echo "🎯 Starting Training with MEDIUM CONFIG"
+echo "========================================"
 echo ""
 echo "Why Medium instead of Large:"
-echo "  - Large: 1.4B params with 32K context = 41GB VRAM (OOM!)"
-echo "  - Medium: 850M params with 16K context = 25-30GB VRAM (fits!)"
-echo "  - Still a very powerful model for your 32K chunks"
+echo "  - Large: 1.4B params, 32K context = 41GB VRAM (OOM!)"
+echo "  - Medium: 850M params, 16K context = ~25GB VRAM (fits!)"
+echo "  - Still powerful - 850M parameters is huge!"
+echo "  - Chunks auto-truncated from 32K to 16K"
 echo ""
 
 # Kill stuck processes
@@ -17,7 +18,7 @@ sleep 2
 
 cd /root/temporal-eigenstate-networks
 
-echo "2. Starting training with Medium config..."
+echo "2. Starting training..."
 echo ""
 
 tmux new -s training -d "
@@ -30,7 +31,7 @@ python3 examples/train_digitalocean.py \
   --tokenized_dir /root/ten_workspace/tokenized/finewebedu \
   --epochs 1 \
   --gradient_accumulation 4 \
-  --save_steps 2000 \
+  --save_steps 1500 \
   --num_workers 0 \
   --learning_rate 3e-4 \
   --mixed_precision \
@@ -40,16 +41,18 @@ python3 examples/train_digitalocean.py \
 "
 
 echo ""
-echo "✅ Training started with Medium config!"
+echo "✅ Training started!"
 echo ""
 echo "Model specs:"
-echo "  - Parameters: 850M (vs 1.4B large)"
-echo "  - Context: 16K tokens (chunks will be truncated from 32K)"
+echo "  - Parameters: 850M"
+echo "  - Context: 16K tokens (auto-truncated from 32K chunks)"
 echo "  - Batch size: 32"
-echo "  - VRAM usage: ~25-30GB (safe!)"
+echo "  - VRAM usage: ~25GB (safe!)"
+echo "  - Training time: ~3 hours"
 echo ""
 echo "Monitor with:"
 echo "  tmux attach -t training"
 echo "  tail -f ~/ten_workspace/logs/training_medium.log"
 echo ""
-echo "Expected: Training starts within 10 seconds!"
+echo "Training should start within 10 seconds!"
+
