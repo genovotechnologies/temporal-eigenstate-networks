@@ -4,12 +4,12 @@ Pre-tokenize and pack datasets for FAST training
 This removes tokenization from the training critical path
 
 Usage:
-    python3 pretokenize_and_pack.py --dataset finewebedu --chunk_size 32768
-    python3 pretokenize_and_pack.py --dataset wikitext-103 --chunk_size 16384
+    python3 pretokenize_and_pack.py --dataset finewebedu --chunk_size 32768 --force
+    python3 pretokenize_and_pack.py --dataset wikitext-103 --chunk_size 16384 --force
 """
 
 import argparse
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from transformers import AutoTokenizer
 import numpy as np
 from pathlib import Path
@@ -17,6 +17,8 @@ import torch
 from tqdm import tqdm
 import json
 import shutil
+import os
+import multiprocessing
 
 def main():
     parser = argparse.ArgumentParser(description="Pre-tokenize and pack datasets")
@@ -27,21 +29,32 @@ def main():
                        help="Chunk size for packing (default: 32768)")
     parser.add_argument("--tokenizer", type=str, default="gpt2",
                        help="Tokenizer to use (default: gpt2)")
-    parser.add_argument("--num_proc", type=int, default=8,
-                       help="Number of processes for parallel tokenization")
-    parser.add_argument("--batch_size", type=int, default=2000,
-                       help="Batch size for tokenization")
+    parser.add_argument("--num_proc", type=int, default=None,
+                       help="Number of processes (default: CPU count)")
+    parser.add_argument("--batch_size", type=int, default=5000,
+                       help="Batch size for tokenization (default: 5000)")
     parser.add_argument("--output_dir", type=str, default="/root/ten_workspace/tokenized",
                        help="Output directory for tokenized chunks")
+    parser.add_argument("--cache_dir", type=str, default="/root/ten_workspace/data",
+                       help="Directory to cache/download datasets locally")
     parser.add_argument("--max_chunks", type=int, default=0,
                        help="Maximum number of chunks to create (0=unlimited)")
     parser.add_argument("--force", action="store_true",
                        help="Force re-tokenization (delete existing output and cache)")
+    parser.add_argument("--streaming", action="store_true",
+                       help="Use streaming mode (no download, process on-the-fly)")
     
     args = parser.parse_args()
     
+    # Auto-detect CPU cores
+    if args.num_proc is None:
+        args.num_proc = multiprocessing.cpu_count()
+        print(f"Auto-detected {args.num_proc} CPU cores")
+    
     # Setup output directory
     outdir = Path(args.output_dir) / args.dataset
+    cache_dir = Path(args.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Clean up existing files if --force or if output directory exists
     if outdir.exists():
@@ -66,14 +79,16 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
-    print("🚀 PRE-TOKENIZATION AND PACKING")
+    print("🚀 PRE-TOKENIZATION AND PACKING (OPTIMIZED)")
     print("=" * 80)
     print(f"\nDataset: {args.dataset}")
     print(f"Chunk size: {args.chunk_size:,} tokens")
     print(f"Tokenizer: {args.tokenizer}")
-    print(f"Parallel processes: {args.num_proc}")
+    print(f"CPU cores: {args.num_proc}")
     print(f"Batch size: {args.batch_size}")
-    print(f"Output: {args.output_dir}")
+    print(f"Output dir: {args.output_dir}")
+    print(f"Cache dir: {args.cache_dir}")
+    print(f"Streaming: {args.streaming}")
     print(f"Force clean: {args.force}")
     print("=" * 80)
     
@@ -94,16 +109,28 @@ def main():
     }
     
     hf_name, hf_config = dataset_map[args.dataset]
-    if hf_config:
-        ds = load_dataset(hf_name, hf_config, split="train")
-    else:
-        ds = load_dataset(hf_name, split="train")
     
-    print(f"  ✓ Dataset loaded: {len(ds):,} samples")
+    # Load or download dataset locally
+    if args.streaming:
+        print("  Using streaming mode (no download)...")
+        if hf_config:
+            ds = load_dataset(hf_name, hf_config, split="train", streaming=True)
+        else:
+            ds = load_dataset(hf_name, split="train", streaming=True)
+        print(f"  ✓ Dataset streaming enabled")
+    else:
+        print(f"  Downloading/loading to cache: {args.cache_dir}")
+        if hf_config:
+            ds = load_dataset(hf_name, hf_config, split="train", cache_dir=str(cache_dir))
+        else:
+            ds = load_dataset(hf_name, split="train", cache_dir=str(cache_dir))
+        print(f"  ✓ Dataset loaded: {len(ds):,} samples")
+        print(f"  ✓ Cached locally in: {cache_dir}")
     
     # Tokenize in parallel
     print(f"\n⚡ Tokenizing with {args.num_proc} parallel processes...")
-    print(f"  Note: Disabling cache to ensure fresh tokenization...")
+    print(f"  Using batch size: {args.batch_size}")
+    print(f"  Cache disabled for fresh tokenization...")
     
     def tokenize_batch(batch):
         # Find text field
@@ -126,7 +153,7 @@ def main():
         tokenize_batch,
         batched=True,
         batch_size=args.batch_size,
-        num_proc=args.num_proc,
+        num_proc=args.num_proc if not args.streaming else None,
         remove_columns=ds.column_names,
         desc="Tokenizing",
         load_from_cache_file=False,  # CRITICAL: Disable cache to maintain speed!
@@ -135,37 +162,41 @@ def main():
     
     print(f"  ✓ Tokenization complete!")
     
-    # Concatenate all tokens
-    print(f"\n🔗 Concatenating tokens...")
-    all_ids = []
-    for example in tqdm(ds_tokenized, desc="Concatenating"):
-        all_ids.extend(example["input_ids"])
-    
-    total_tokens = len(all_ids)
-    print(f"  ✓ Total tokens: {total_tokens:,}")
-    print(f"  ✓ Will create ~{total_tokens // args.chunk_size:,} chunks")
-    
-    # Pack into fixed-length chunks
-    print(f"\n📦 Packing into {args.chunk_size}-token chunks...")
+    # OPTIMIZED: Stream and pack directly (no slow concatenation!)
+    print(f"\n� Streaming and packing into {args.chunk_size}-token chunks...")
+    print(f"  (This is MUCH faster than the old concatenation method!)")
     
     chunks_created = 0
     chunks_to_create = args.max_chunks if args.max_chunks > 0 else float('inf')
+    current_chunk = []
+    total_tokens = 0
     
-    for i in tqdm(range(0, len(all_ids), args.chunk_size), desc="Saving chunks"):
+    # Stream through tokenized data and pack on-the-fly
+    for example in tqdm(ds_tokenized, desc="Packing chunks", unit=" samples"):
+        tokens = example["input_ids"]
+        current_chunk.extend(tokens)
+        total_tokens += len(tokens)
+        
+        # When we have enough tokens for a full chunk, save it
+        while len(current_chunk) >= args.chunk_size:
+            if chunks_created >= chunks_to_create:
+                break
+                
+            # Extract exactly chunk_size tokens
+            chunk = current_chunk[:args.chunk_size]
+            current_chunk = current_chunk[args.chunk_size:]
+            
+            # Save chunk
+            chunk_tensor = torch.tensor(chunk, dtype=torch.long)
+            chunk_path = outdir / f"chunk_{chunks_created:06d}.pt"
+            torch.save(chunk_tensor, chunk_path)
+            chunks_created += 1
+        
         if chunks_created >= chunks_to_create:
             break
-            
-        chunk = all_ids[i:i + args.chunk_size]
-        
-        # Only save full chunks (no partial chunks at end)
-        if len(chunk) < args.chunk_size:
-            print(f"\n  ⚠️  Skipping partial chunk at end ({len(chunk)} tokens)")
-            continue
-        
-        chunk_tensor = torch.tensor(chunk, dtype=torch.long)
-        chunk_path = outdir / f"chunk_{chunks_created:06d}.pt"
-        torch.save(chunk_tensor, chunk_path)
-        chunks_created += 1
+    
+    print(f"\n  ✓ Packed {chunks_created:,} chunks from {total_tokens:,} tokens")
+    print(f"  ✓ Leftover tokens (not saved): {len(current_chunk):,}")
     
     # Save metadata
     metadata = {
