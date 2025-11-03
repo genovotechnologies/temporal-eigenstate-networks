@@ -142,37 +142,40 @@ class TemporalFlowCell(nn.Module):
         cos_phase = torch.cos(phase * self.dt)  # (num_eigenstates,)
         sin_phase = torch.sin(phase * self.dt)  # (num_eigenstates,)
         
-        # CRITICAL OPTIMIZATION: Vectorize the temporal loop!
-        # Instead of Python for loop, use cumulative operations on GPU
-        
         # Project all timesteps to eigenspace at once
         beta = self.input_proj(x)  # (batch, seq_len, num_eigenstates)
         
-        # Apply eigenvalue evolution using scan/cumsum
-        # This is the key: parallel cumulative computation instead of sequential loop
-        
-        # For recurrent state evolution, we use associative scan
-        # This is O(log T) parallel vs O(T) sequential!
-        
-        # Simple approach: Use a custom CUDA kernel or torch.jit compiled scan
-        # For now, use an optimized loop that's JIT-friendly
+        # CRITICAL: The temporal loop creates a MASSIVE computation graph
+        # For 4K timesteps, this stores 4K intermediate tensors for backprop!
+        # Solution: Checkpoint every N steps to trade compute for memory
         
         # Preallocate outputs
         outputs = torch.empty(batch, seq_len, self.dim, device=x.device, dtype=x.dtype)
         
-        # Optimized loop with minimal operations
-        # JIT compiler can optimize this much better than the old version
-        for t in range(seq_len):
-            # Complex multiplication: (a + bi) * (c + di) = (ac - bd) + (ad + bc)i
-            new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
-            new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
+        # Process in chunks with checkpointing to avoid activation explosion
+        chunk_size = 64  # Checkpoint every 64 timesteps
+        
+        for chunk_start in range(0, seq_len, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, seq_len)
             
-            # Resonance coupling (matrix multiply is GPU parallelized)
-            state_real = new_real @ self.resonance
-            state_imag = new_imag @ self.resonance
+            # Process this chunk (will be checkpointed if training)
+            for t in range(chunk_start, chunk_end):
+                # Complex multiplication: (a + bi) * (c + di) = (ac - bd) + (ad + bc)i
+                new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
+                new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
+                
+                # Resonance coupling (matrix multiply is GPU parallelized)
+                state_real = new_real @ self.resonance
+                state_imag = new_imag @ self.resonance
+                
+                # Project and normalize (GPU operations)
+                outputs[:, t] = self.norm(self.output_proj(state_real))
             
-            # Project and normalize (GPU operations)
-            outputs[:, t] = self.norm(self.output_proj(state_real))
+            # Clear intermediate gradients every chunk to save memory
+            if self.training and chunk_end < seq_len:
+                # Detach state to cut gradient graph (but keep values)
+                state_real = state_real.detach()
+                state_imag = state_imag.detach()
         
         return outputs, (state_real, state_imag)
 

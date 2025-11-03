@@ -127,7 +127,7 @@ CONFIGS = {
         "n_layers": 8,
         "num_eigenstates": 96,
         "batch_size": 32,  # Increased from 16 with optimizations
-        "max_seq_len": 4096,
+        "max_seq_len": 1024,  # Start with 1K to validate, then scale up
         "description": "Micro - 100M params (~15 min) - FAST TEST",
     },
     "tiny": {
@@ -689,6 +689,10 @@ class DigitalOceanTrainer:
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
             
             for batch_idx, batch in enumerate(progress_bar):
+                # Memory tracking for first batch
+                if batch_idx == 0:
+                    torch.cuda.reset_peak_memory_stats()
+                
                 # Handle both pre-tokenized and regular data
                 if self.args.pretokenized:
                     # Pre-tokenized: batch is already input_ids tensor
@@ -702,10 +706,21 @@ class DigitalOceanTrainer:
                 labels = input_ids[:, 1:].contiguous()
                 inputs = input_ids[:, :-1].contiguous()
                 
+                # Memory checkpoint: after data load
+                if batch_idx == 0:
+                    mem_data = torch.cuda.max_memory_allocated() / 1024**3
+                    print(f"\n  Memory after data load: {mem_data:.2f}GB")
+                
                 # Forward pass
                 if use_amp:
                     with autocast(device_type='cuda', dtype=torch.float16):
                         outputs = model(inputs)
+                        
+                        # Memory checkpoint: after forward
+                        if batch_idx == 0:
+                            mem_fwd = torch.cuda.max_memory_allocated() / 1024**3
+                            print(f"  Memory after forward: {mem_fwd:.2f}GB (delta: {mem_fwd-mem_data:.2f}GB)")
+                        
                         # outputs shape: (batch, seq_len-1, vocab_size)
                         loss = nn.functional.cross_entropy(
                             outputs.reshape(-1, outputs.size(-1)),
@@ -714,7 +729,18 @@ class DigitalOceanTrainer:
                         )
                         loss = loss / self.args.gradient_accumulation
                     
+                    # Memory checkpoint: before backward
+                    if batch_idx == 0:
+                        mem_loss = torch.cuda.max_memory_allocated() / 1024**3
+                        print(f"  Memory after loss: {mem_loss:.2f}GB (delta: {mem_loss-mem_fwd:.2f}GB)")
+                    
                     scaler.scale(loss).backward()
+                    
+                    # Memory checkpoint: after backward
+                    if batch_idx == 0:
+                        mem_bwd = torch.cuda.max_memory_allocated() / 1024**3
+                        print(f"  Memory after backward: {mem_bwd:.2f}GB (delta: {mem_bwd-mem_loss:.2f}GB)")
+                        print(f"  TOTAL PEAK: {mem_bwd:.2f}GB\n")
                 else:
                     outputs = model(inputs)
                     loss = nn.functional.cross_entropy(
