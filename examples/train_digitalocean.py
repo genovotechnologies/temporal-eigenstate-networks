@@ -47,12 +47,14 @@ class PreTokenizedDataset(Dataset):
     
     Loads chunks from disk on-demand with LRU caching.
     Uses memory-mapped loading for speed.
+    Automatically truncates chunks to max_seq_len if needed.
     """
     
-    def __init__(self, chunks_dir, cache_size=128):
+    def __init__(self, chunks_dir, cache_size=128, max_seq_len=None):
         self.chunks_dir = Path(chunks_dir)
         self.chunk_files = sorted(self.chunks_dir.glob("chunk_*.pt"))
         self.cache_size = cache_size
+        self.max_seq_len = max_seq_len
         self._cache = {}
         self._cache_order = []
         
@@ -65,7 +67,16 @@ class PreTokenizedDataset(Dataset):
         
         print(f"  Found {len(self.chunk_files)} pre-tokenized chunks")
         print(f"  Chunk size: {self.metadata['chunk_size']:,} tokens")
-        print(f"  Total tokens: {self.metadata['total_tokens']:,}")
+        
+        # Warn if truncation will occur
+        if max_seq_len and max_seq_len < self.metadata['chunk_size']:
+            print(f"  ⚠️  Chunks will be TRUNCATED from {self.metadata['chunk_size']:,} to {max_seq_len:,} tokens")
+            print(f"  This wastes {(1 - max_seq_len/self.metadata['chunk_size'])*100:.1f}% of pre-tokenized data")
+            effective_tokens = len(self.chunk_files) * max_seq_len
+        else:
+            effective_tokens = self.metadata['total_tokens']
+        
+        print(f"  Effective tokens: {effective_tokens:,}")
         
         # Calculate total disk usage
         total_size_gb = len(self.chunk_files) * self.metadata['chunk_size'] * 2 / 1024**3
@@ -79,19 +90,23 @@ class PreTokenizedDataset(Dataset):
     def __getitem__(self, idx):
         # Check cache first
         if idx in self._cache:
-            return self._cache[idx]
+            chunk = self._cache[idx]
+        else:
+            # Load chunk from disk
+            chunk = torch.load(self.chunk_files[idx], weights_only=True)
+            
+            # Add to cache with LRU eviction
+            if len(self._cache) >= self.cache_size:
+                # Remove oldest item
+                oldest_idx = self._cache_order.pop(0)
+                del self._cache[oldest_idx]
+            
+            self._cache[idx] = chunk
+            self._cache_order.append(idx)
         
-        # Load chunk from disk
-        chunk = torch.load(self.chunk_files[idx], weights_only=True)
-        
-        # Add to cache with LRU eviction
-        if len(self._cache) >= self.cache_size:
-            # Remove oldest item
-            oldest_idx = self._cache_order.pop(0)
-            del self._cache[oldest_idx]
-        
-        self._cache[idx] = chunk
-        self._cache_order.append(idx)
+        # Truncate if needed
+        if self.max_seq_len and chunk.size(0) > self.max_seq_len:
+            chunk = chunk[:self.max_seq_len]
         
         return chunk
 
@@ -418,7 +433,12 @@ class DigitalOceanTrainer:
             
             # Load pre-tokenized dataset with aggressive caching
             # Cache size: 256 chunks × 32K tokens × 2 bytes = ~16MB per chunk × 256 = ~4GB cache
-            dataset = PreTokenizedDataset(tokenized_dir, cache_size=256)
+            # Pass max_seq_len to automatically truncate chunks if needed
+            dataset = PreTokenizedDataset(
+                tokenized_dir, 
+                cache_size=256,
+                max_seq_len=self.config['max_seq_len']
+            )
             
             # Load metadata for tokenizer info
             with open(tokenized_dir / "metadata.json") as f:
