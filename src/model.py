@@ -226,18 +226,23 @@ class ResonanceBlock(nn.Module):
         
         Args:
             x: Input (batch, seq_len, dim)
-            states: Optional list of states for each cell
+            states: Optional list of states for each cell (only used for generation)
             
         Returns:
             output: (batch, seq_len, dim)
-            new_states: Updated states
+            new_states: Updated states (or None during training to save memory)
         """
-        if states is None:
+        # MEMORY OPTIMIZATION: Don't track states during training!
+        # States are only needed for autoregressive generation
+        # This saves MASSIVE memory: 4 cells × batch × seq × dim per layer
+        track_states = states is not None
+        
+        if not track_states:
             states = [None] * len(self.cells)
         
         # Run all cells in parallel and AVERAGE instead of concatenate
         # This is memory-efficient: no 4× expansion!
-        new_states = []
+        new_states = [] if track_states else None
         mixed = None
         
         for cell, state in zip(self.cells, states):
@@ -247,7 +252,10 @@ class ResonanceBlock(nn.Module):
                 mixed = out
             else:
                 mixed = mixed + out
-            new_states.append(new_state)
+            
+            # Only track states if explicitly requested (generation mode)
+            if track_states:
+                new_states.append(new_state)
         
         # Average the accumulated outputs
         mixed = mixed / len(self.cells)
@@ -392,31 +400,25 @@ class TemporalEigenstateNetwork(nn.Module):
         # Add positional embeddings
         x = x + self.pos_emb[:, :seq_len, :]
         
-        # Initialize states if needed
-        if states is None:
+        # MEMORY OPTIMIZATION: Don't track states during training!
+        # States only needed for autoregressive generation, not training
+        # This saves: num_layers × 4 cells × batch × seq × dim of memory!
+        track_states = states is not None or return_states
+        
+        # Initialize states if needed (generation mode)
+        if track_states and states is None:
             states = [[None] * len(block.cells) for block in self.blocks]
+        elif not track_states:
+            states = [None] * len(self.blocks)  # Just placeholders
         
         # Pass through all blocks
-        new_states = []
+        new_states = [] if track_states else None
         for block, block_states in zip(self.blocks, states):
-            # Use gradient checkpointing if enabled (trades compute for memory)
-            if self.training and self.use_gradient_checkpointing:
-                # Checkpoint requires function that takes only tensors
-                def create_custom_forward(module):
-                    def custom_forward(x_in):
-                        out, _ = module(x_in, block_states)
-                        return out
-                    return custom_forward
-                x = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    x,
-                    use_reentrant=False
-                )
-                # Still track states but don't checkpoint them
-                _, block_new_states = block(x.detach(), block_states)
-                new_states.append(block_new_states)
-            else:
-                x, block_new_states = block(x, block_states)
+            # CRITICAL: Don't use gradient checkpointing with stateful models!
+            # It causes double forward passes and explodes memory
+            # TEN is already memory efficient - checkpointing hurts more than helps
+            x, block_new_states = block(x, block_states)
+            if track_states:
                 new_states.append(block_new_states)
         
         # Final norm

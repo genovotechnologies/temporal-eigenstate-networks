@@ -23,6 +23,7 @@ import argparse
 import time
 import os
 import sys
+import gc
 from pathlib import Path
 from tqdm import tqdm
 import json
@@ -113,6 +114,14 @@ class PreTokenizedDataset(Dataset):
 
 # Predefined configurations optimized for 48GB GPU
 CONFIGS = {
+    "micro": {
+        "d_model": 768,
+        "n_layers": 8,
+        "num_eigenstates": 96,
+        "batch_size": 16,
+        "max_seq_len": 4096,
+        "description": "Micro test - 100M params (~20 min)",
+    },
     "tiny": {
         "d_model": 512,
         "n_layers": 6,
@@ -133,9 +142,9 @@ CONFIGS = {
         "d_model": 1536,
         "n_layers": 16,
         "num_eigenstates": 192,
-        "batch_size": 16,  # Reduced from 32 for memory efficiency with 2× FFN
+        "batch_size": 8,  # Reduced from 16 - aggressive memory optimization
         "max_seq_len": 16384,
-        "description": "Medium - 419M params (~3 hours)",
+        "description": "Medium - 268M params (~3 hours)",
     },
     "large": {
         "d_model": 2048,
@@ -703,6 +712,10 @@ class DigitalOceanTrainer:
                 
                 epoch_loss += loss.item() * self.args.gradient_accumulation
                 
+                # CRITICAL: Aggressive memory cleanup every batch
+                # Delete intermediate tensors explicitly
+                del outputs, loss, labels, inputs, input_ids
+                
                 # Gradient accumulation
                 if (batch_idx + 1) % self.args.gradient_accumulation == 0:
                     if use_amp:
@@ -714,6 +727,11 @@ class DigitalOceanTrainer:
                     scheduler.step()
                     optimizer.zero_grad()
                     global_step += 1
+                    
+                    # Force garbage collection every step
+                    if global_step % 10 == 0:
+                        torch.cuda.empty_cache()
+                        gc.collect()
                 
                 # Update progress bar
                 progress_bar.set_postfix({
