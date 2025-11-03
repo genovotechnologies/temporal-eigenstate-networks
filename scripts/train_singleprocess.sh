@@ -19,13 +19,14 @@ echo ""
 
 tmux new -s training -d "
 CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python3 examples/train_digitalocean.py \
   --config large \
   --dataset finewebedu \
   --pretokenized \
   --tokenized_dir /root/ten_workspace/tokenized/finewebedu \
   --epochs 1 \
-  --gradient_accumulation 4 \
+  --gradient_accumulation 8 \
   --save_steps 2500 \
   --num_workers 0 \
   --learning_rate 3e-4 \
