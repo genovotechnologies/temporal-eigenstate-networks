@@ -39,13 +39,16 @@ from model import TemporalEigenstateConfig, TemporalEigenstateNetwork
 class PreTokenizedDataset(Dataset):
     """Fast dataset loader for pre-tokenized and packed chunks
     
-    Loads chunks from disk on-demand (no RAM explosion!)
+    Loads chunks from disk on-demand with LRU caching.
     Uses memory-mapped loading for speed.
     """
     
-    def __init__(self, chunks_dir):
+    def __init__(self, chunks_dir, cache_size=128):
         self.chunks_dir = Path(chunks_dir)
         self.chunk_files = sorted(self.chunks_dir.glob("chunk_*.pt"))
+        self.cache_size = cache_size
+        self._cache = {}
+        self._cache_order = []
         
         if not self.chunk_files:
             raise ValueError(f"No chunks found in {chunks_dir}")
@@ -61,15 +64,30 @@ class PreTokenizedDataset(Dataset):
         # Calculate total disk usage
         total_size_gb = len(self.chunk_files) * self.metadata['chunk_size'] * 2 / 1024**3
         print(f"  Total size: ~{total_size_gb:.1f}GB on disk")
-        print(f"  ✓ Chunks will be loaded on-demand (no RAM explosion!)")
+        print(f"  ✓ LRU cache: {cache_size} chunks in RAM (~{cache_size * self.metadata['chunk_size'] * 2 / 1024**2:.0f}MB)")
+        print(f"  ✓ Chunks loaded on-demand with caching!")
     
     def __len__(self):
         return len(self.chunk_files)
     
     def __getitem__(self, idx):
-        # Load chunk from disk on-demand
-        # PyTorch DataLoader workers will cache these efficiently
-        return torch.load(self.chunk_files[idx], weights_only=True)
+        # Check cache first
+        if idx in self._cache:
+            return self._cache[idx]
+        
+        # Load chunk from disk
+        chunk = torch.load(self.chunk_files[idx], weights_only=True)
+        
+        # Add to cache with LRU eviction
+        if len(self._cache) >= self.cache_size:
+            # Remove oldest item
+            oldest_idx = self._cache_order.pop(0)
+            del self._cache[oldest_idx]
+        
+        self._cache[idx] = chunk
+        self._cache_order.append(idx)
+        
+        return chunk
 
 
 # Predefined configurations optimized for 48GB GPU
@@ -386,8 +404,9 @@ class DigitalOceanTrainer:
                 print(f"  python3 scripts/pretokenize_and_pack.py --dataset {self.args.dataset} --chunk_size {self.config['max_seq_len']}")
                 return
             
-            # Load pre-tokenized dataset
-            dataset = PreTokenizedDataset(tokenized_dir)
+            # Load pre-tokenized dataset with aggressive caching
+            # Cache size: 256 chunks × 32K tokens × 2 bytes = ~16MB per chunk × 256 = ~4GB cache
+            dataset = PreTokenizedDataset(tokenized_dir, cache_size=256)
             
             # Load metadata for tokenizer info
             with open(tokenized_dir / "metadata.json") as f:
@@ -401,7 +420,7 @@ class DigitalOceanTrainer:
             
             tokenizer = TokenizerMock(metadata)
             
-            # Create optimized DataLoader
+            # Create optimized DataLoader with aggressive prefetching
             train_loader = DataLoader(
                 dataset,
                 batch_size=self.config['batch_size'],
@@ -409,11 +428,13 @@ class DigitalOceanTrainer:
                 num_workers=self.args.num_workers,
                 pin_memory=True,
                 persistent_workers=True if self.args.num_workers > 0 else False,
-                prefetch_factor=4 if self.args.num_workers > 0 else None
+                prefetch_factor=16 if self.args.num_workers > 0 else None,  # Increased from 4 to 16!
+                multiprocessing_context='fork' if self.args.num_workers > 0 else None
             )
             
             print(f"  ✓ Pre-tokenized data loaded: {len(dataset):,} chunks")
-            print(f"  ✓ Fast DataLoader configured ({self.args.num_workers} workers)")
+            print(f"  ✓ Fast DataLoader configured ({self.args.num_workers} workers, prefetch={16})")
+            print(f"  ✓ Aggressive prefetching: {self.args.num_workers * 16} batches in pipeline!")
             
         else:
             # Standard tokenization path (slower)
