@@ -30,7 +30,7 @@ python3 examples/train_digitalocean.py \
   --pretokenized \
   --tokenized_dir /root/ten_workspace/tokenized/finewebedu \
   --epochs 1 \
-  --gradient_accumulation 4 \
+  --gradient_accumulation 16 \
   --save_steps 1500 \
   --num_workers 0 \
   --learning_rate 3e-4 \
