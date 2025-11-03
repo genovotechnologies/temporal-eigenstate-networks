@@ -16,7 +16,7 @@ Usage:
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from datasets import load_dataset
 from transformers import AutoTokenizer
 import argparse
@@ -69,7 +69,7 @@ class PreTokenizedDataset(Dataset):
     def __getitem__(self, idx):
         # Load chunk from disk on-demand
         # PyTorch DataLoader workers will cache these efficiently
-        return torch.load(self.chunk_files[idx])
+        return torch.load(self.chunk_files[idx], weights_only=True)
 
 
 # Predefined configurations optimized for 48GB GPU
@@ -562,7 +562,7 @@ class DigitalOceanTrainer:
         
         # Mixed precision
         use_amp = self.args.mixed_precision
-        scaler = GradScaler() if use_amp else None
+        scaler = GradScaler('cuda') if use_amp else None
         print(f"  Mixed precision: {'Enabled' if use_amp else 'Disabled'}")
         
         print(f"  Optimizer: {'AdamW8bit' if self.args.use_8bit_optim else 'AdamW'} (lr={self.args.learning_rate})")
@@ -619,7 +619,7 @@ class DigitalOceanTrainer:
                 
                 # Forward pass
                 if use_amp:
-                    with autocast('cuda'):
+                    with autocast(device_type='cuda', dtype=torch.float16):
                         outputs = model(inputs)
                         # outputs shape: (batch, seq_len-1, vocab_size)
                         loss = nn.functional.cross_entropy(
