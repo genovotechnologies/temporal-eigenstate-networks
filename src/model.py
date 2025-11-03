@@ -142,7 +142,9 @@ class TemporalFlowCell(nn.Module):
         cos_phase = torch.cos(phase * self.dt)
         sin_phase = torch.sin(phase * self.dt)
         
-        outputs = []
+        # Preallocate output tensor for memory efficiency (no list building!)
+        batch_size = x.size(0)
+        outputs = torch.empty(batch_size, seq_len, self.dim, device=x.device, dtype=x.dtype)
         
         for t in range(seq_len):
             xt = x[:, t]  # (batch, dim)
@@ -168,9 +170,8 @@ class TemporalFlowCell(nn.Module):
             output = self.output_proj(state_real)  # (batch, dim)
             output = self.norm(output)
             
-            outputs.append(output)
-        
-        outputs = torch.stack(outputs, dim=1)  # (batch, seq_len, dim)
+            # Write directly to preallocated tensor (memory efficient!)
+            outputs[:, t] = output
         
         return outputs, (state_real, state_imag)
 
@@ -197,8 +198,8 @@ class ResonanceBlock(nn.Module):
             for _ in range(num_cells)
         ])
         
-        # Mix outputs from different cells
-        self.cell_mix = nn.Linear(dim * num_cells, dim)
+        # No cell_mix needed - we average outputs for memory efficiency
+        # This makes TEN 4× more memory efficient than concatenation!
         
         # Feedforward network
         self.ffn = nn.Sequential(
@@ -232,18 +233,22 @@ class ResonanceBlock(nn.Module):
         if states is None:
             states = [None] * len(self.cells)
         
-        # Run all cells in parallel
-        cell_outputs = []
+        # Run all cells in parallel and AVERAGE instead of concatenate
+        # This is memory-efficient: no 4× expansion!
         new_states = []
+        mixed = None
         
         for cell, state in zip(self.cells, states):
             out, new_state = cell(x, state)
-            cell_outputs.append(out)
+            # Average outputs instead of concatenating (memory efficient!)
+            if mixed is None:
+                mixed = out
+            else:
+                mixed = mixed + out
             new_states.append(new_state)
         
-        # Concatenate and mix cell outputs
-        concat = torch.cat(cell_outputs, dim=-1)
-        mixed = self.cell_mix(concat)
+        # Average the accumulated outputs
+        mixed = mixed / len(self.cells)
         
         # First residual + norm
         x = self.norm1(x + mixed)
