@@ -26,6 +26,12 @@ import sys
 from pathlib import Path
 from tqdm import tqdm
 import json
+import multiprocessing as mp
+
+# CRITICAL: Set start method for multiprocessing BEFORE any CUDA operations
+# This prevents the "bootstrapping phase" error with spawn
+if __name__ == '__main__':
+    mp.set_start_method('spawn', force=True)
 
 # Enable cuDNN benchmarking for faster training
 torch.backends.cudnn.benchmark = True
@@ -740,6 +746,7 @@ class DigitalOceanTrainer:
 
 
 def main():
+    """Main training function - must be called from __main__ for multiprocessing"""
     parser = argparse.ArgumentParser(description="Train TEN on DigitalOcean GPU")
     
     # Model configuration
