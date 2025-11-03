@@ -386,12 +386,18 @@ class DigitalOceanTrainer:
         use_streaming = False
         
         # Try to compile model for extra speed (PyTorch 2.x)
-        try:
-            print(f"\n🔥 Attempting torch.compile() for extra speed...")
-            model = torch.compile(model)
-            print(f"  ✓ Model compiled successfully!")
-        except Exception as e:
-            print(f"  ⚠️  torch.compile() skipped: {e}")
+        # NOTE: torch.compile() can cause deadlocks with 'fork' multiprocessing
+        # We use 'spawn' to avoid this, but compile can still be flaky
+        if not self.args.no_compile:
+            try:
+                print(f"\n🔥 Attempting torch.compile() for extra speed...")
+                model = torch.compile(model)
+                print(f"  ✓ Model compiled successfully!")
+                print(f"  ℹ️  Using 'spawn' multiprocessing to avoid deadlocks")
+            except Exception as e:
+                print(f"  ⚠️  torch.compile() skipped: {e}")
+        else:
+            print(f"\n⚠️  Skipping torch.compile() (--no_compile flag set)")
         
         # Check if using pre-tokenized data
         if self.args.pretokenized:
@@ -421,6 +427,8 @@ class DigitalOceanTrainer:
             tokenizer = TokenizerMock(metadata)
             
             # Create optimized DataLoader with aggressive prefetching
+            # CRITICAL: Use 'spawn' instead of 'fork' to avoid deadlocks with torch.compile()
+            # Fork can cause deadlocks when combined with CUDA and compiled models
             train_loader = DataLoader(
                 dataset,
                 batch_size=self.config['batch_size'],
@@ -428,13 +436,14 @@ class DigitalOceanTrainer:
                 num_workers=self.args.num_workers,
                 pin_memory=True,
                 persistent_workers=True if self.args.num_workers > 0 else False,
-                prefetch_factor=16 if self.args.num_workers > 0 else None,  # Increased from 4 to 16!
-                multiprocessing_context='fork' if self.args.num_workers > 0 else None
+                prefetch_factor=4 if self.args.num_workers > 0 else None,  # Reduced from 16 to avoid memory pressure
+                multiprocessing_context='spawn' if self.args.num_workers > 0 else None  # Changed from 'fork' to 'spawn'!
             )
             
             print(f"  ✓ Pre-tokenized data loaded: {len(dataset):,} chunks")
-            print(f"  ✓ Fast DataLoader configured ({self.args.num_workers} workers, prefetch={16})")
-            print(f"  ✓ Aggressive prefetching: {self.args.num_workers * 16} batches in pipeline!")
+            print(f"  ✓ Fast DataLoader configured ({self.args.num_workers} workers, prefetch={4})")
+            print(f"  ✓ Using 'spawn' multiprocessing (prevents deadlocks with torch.compile)")
+            print(f"  ✓ Prefetching: {self.args.num_workers * 4} batches in pipeline!")
             
         else:
             # Standard tokenization path (slower)
@@ -774,6 +783,8 @@ def main():
                        help="DataLoader workers (default: 8, set to 0 to disable)")
     parser.add_argument("--use_8bit_optim", action="store_true",
                        help="Use 8-bit AdamW optimizer (requires bitsandbytes)")
+    parser.add_argument("--no_compile", action="store_true",
+                       help="Disable torch.compile() (use if training hangs/deadlocks)")
 
     # Dry-run and tokenizer options
     parser.add_argument("--dry_run", action="store_true",
