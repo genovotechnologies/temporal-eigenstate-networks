@@ -302,7 +302,7 @@ class DigitalOceanTrainer:
             
             # Memory optimizations
             chunk_size=self.config.get('chunk_size', 64),
-            use_gradient_checkpointing=self.config.get('use_gradient_checkpointing', True),
+            use_gradient_checkpointing=self.config.get('use_gradient_checkpointing', False),  # Disabled for state tracking
             
             # Paper-compliant features
             use_resonance=self.config.get('use_resonance', True),
@@ -313,8 +313,8 @@ class DigitalOceanTrainer:
             # Positional embeddings (learned is more efficient for training)
             pos_emb_type=self.config.get('pos_emb_type', 'learned'),
             
-            # Energy regularization (Theorem 4)
-            energy_reg_weight=self.config.get('energy_reg_weight', 0.01),
+            # Magnitude regularization (penalizes large eigenvalues for stability)
+            magnitude_reg_weight=self.config.get('magnitude_reg_weight', 0.01),
             
             # Hierarchical TEN (Section 5) - optional
             use_hten=self.config.get('use_hten', False),

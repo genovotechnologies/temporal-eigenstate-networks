@@ -42,11 +42,11 @@ def train_standard_ten():
         num_cells=2,
         max_seq_len=128,
         chunk_size=64,
-        use_gradient_checkpointing=True,
+        use_gradient_checkpointing=False,  # Disabled for state tracking (chunking provides memory efficiency)
         use_resonance=True,
         ffn_multiplier=4.0,
         pos_emb_type="learned",
-        energy_reg_weight=0.01,  # Enable energy regularization
+        magnitude_reg_weight=0.01,  # Enable magnitude regularization (penalizes large eigenvalues)
     )
     
     # Create model
@@ -82,7 +82,7 @@ def train_standard_ten():
         print(f"Step {step+1}:")
         print(f"  Total Loss: {total_loss.item():.4f}")
         print(f"  CE Loss: {loss_dict['ce_loss'].item():.4f}")
-        print(f"  Energy Loss: {loss_dict['energy_loss'].item():.4f}")
+        print(f"  Magnitude Loss: {loss_dict['magnitude_loss'].item():.4f}")
     
     print("\n✓ Training complete!")
     return model
@@ -105,7 +105,7 @@ def train_hierarchical_ten():
         chunk_size=64,
         use_hten=True,  # Enable HTEN!
         hten_scales=[1, 2, 4],  # Multi-scale processing
-        use_gradient_checkpointing=True,
+        use_gradient_checkpointing=False,  # Disabled for state tracking
         use_resonance=True,
         ffn_multiplier=4.0,
     )
@@ -224,7 +224,7 @@ def demonstrate_mixed_precision():
         n_layers=2,
         num_eigenstates=32,
         chunk_size=64,
-        use_gradient_checkpointing=True,
+        use_gradient_checkpointing=False,  # Disabled for state tracking
     )
     
     model = TemporalEigenstateNetwork(config)

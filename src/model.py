@@ -1388,7 +1388,7 @@ def print_model_summary(model: TemporalEigenstateNetwork, verbose: bool = True):
     print(f"  FFN multiplier: {config.ffn_multiplier}x")
     print(f"  Position embeddings: {config.pos_emb_type}")
     print(f"  Eigenvalue clip: {config.eigenvalue_clip}")
-    print(f"  Energy regularization weight: {config.energy_reg_weight}")
+    print(f"  Magnitude regularization weight: {config.magnitude_reg_weight}")
     
     # Parameter count
     total_params = count_parameters(model)
