@@ -122,13 +122,21 @@ class PreTokenizedDataset(Dataset):
 
 # Predefined configurations optimized for 48GB GPU
 CONFIGS = {
+    "nano": {
+        "d_model": 512,
+        "n_layers": 4,
+        "num_eigenstates": 64,
+        "batch_size": 8,  # Very small for memory testing
+        "max_seq_len": 512,  # Start tiny
+        "description": "Nano - 25M params - MEMORY TEST",
+    },
     "micro": {
         "d_model": 768,
         "n_layers": 8,
         "num_eigenstates": 96,
-        "batch_size": 32,  # Increased from 16 with optimizations
-        "max_seq_len": 1024,  # Start with 1K to validate, then scale up
-        "description": "Micro - 100M params (~15 min) - FAST TEST",
+        "batch_size": 16,  # Reduced from 32
+        "max_seq_len": 1024,  # Start with 1K to validate
+        "description": "Micro - 70M params (~15 min)",
     },
     "tiny": {
         "d_model": 512,

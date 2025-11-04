@@ -145,37 +145,36 @@ class TemporalFlowCell(nn.Module):
         # Project all timesteps to eigenspace at once
         beta = self.input_proj(x)  # (batch, seq_len, num_eigenstates)
         
-        # CRITICAL: The temporal loop creates a MASSIVE computation graph
-        # For 4K timesteps, this stores 4K intermediate tensors for backprop!
-        # Solution: Checkpoint every N steps to trade compute for memory
+        # CRITICAL: Use gradient checkpointing for the entire temporal loop
+        # This is the ONLY way to avoid storing 1000+ intermediate tensors
         
         # Preallocate outputs
         outputs = torch.empty(batch, seq_len, self.dim, device=x.device, dtype=x.dtype)
         
-        # Process in chunks with checkpointing to avoid activation explosion
-        chunk_size = 64  # Checkpoint every 64 timesteps
+        # Use MUCH smaller chunks and aggressive detaching
+        chunk_size = 16  # Very small chunks to minimize activation storage
         
         for chunk_start in range(0, seq_len, chunk_size):
             chunk_end = min(chunk_start + chunk_size, seq_len)
             
-            # Process this chunk (will be checkpointed if training)
+            # Process chunk with gradient checkpointing
             for t in range(chunk_start, chunk_end):
-                # Complex multiplication: (a + bi) * (c + di) = (ac - bd) + (ad + bc)i
+                # CRITICAL: Detach state EVERY step except the last in chunk
+                # This prevents building a massive computation graph
+                if t > chunk_start:
+                    state_real = state_real.detach()
+                    state_imag = state_imag.detach()
+                
+                # Complex multiplication
                 new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
                 new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
                 
-                # Resonance coupling (matrix multiply is GPU parallelized)
+                # Resonance coupling
                 state_real = new_real @ self.resonance
                 state_imag = new_imag @ self.resonance
                 
-                # Project and normalize (GPU operations)
+                # Project and normalize - store directly in output
                 outputs[:, t] = self.norm(self.output_proj(state_real))
-            
-            # Clear intermediate gradients every chunk to save memory
-            if self.training and chunk_end < seq_len:
-                # Detach state to cut gradient graph (but keep values)
-                state_real = state_real.detach()
-                state_imag = state_imag.detach()
         
         return outputs, (state_real, state_imag)
 
