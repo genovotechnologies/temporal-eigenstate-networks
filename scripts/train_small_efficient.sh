@@ -37,7 +37,6 @@ python3 examples/train_digitalocean.py \
   --num_workers 0 \
   --learning_rate 3e-4 \
   --mixed_precision \
-  --no_compile \
   --output_dir /root/ten_workspace/runs/\$(date +%F_%H-%M) \
   2>&1 | tee /root/ten_workspace/logs/training_small.log
 "

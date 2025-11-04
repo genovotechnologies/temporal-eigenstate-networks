@@ -481,8 +481,8 @@ class DigitalOceanTrainer:
         use_streaming = False
         
         # Try to compile model for extra speed (PyTorch 2.x)
-        # torch.compile() with proper backend selection for L40S/Ada
-        if not self.args.no_compile:
+        # NOTE: Disabled by default as it can cause CUDA errors with TEN's complex operations
+        if self.args.compile:
             try:
                 print(f"\n🔥 Compiling model with torch.compile() for 2-3× speedup...")
                 # Use 'reduce-overhead' mode for recurrent models like TEN
@@ -499,7 +499,8 @@ class DigitalOceanTrainer:
                 print(f"  ⚠️  torch.compile() failed: {e}")
                 print(f"  Continuing without compilation...")
         else:
-            print(f"\n⚠️  Skipping torch.compile() (--no_compile flag set)")
+            print(f"\n⚠️  torch.compile() disabled (use --compile to enable)")
+            print(f"  Note: Compilation may cause CUDA errors with TEN - only use if stable")
         
         # Check if using pre-tokenized data
         if self.args.pretokenized:
@@ -939,8 +940,8 @@ def main():
                        help="DataLoader workers (default: 8, set to 0 to disable)")
     parser.add_argument("--use_8bit_optim", action="store_true",
                        help="Use 8-bit AdamW optimizer (requires bitsandbytes)")
-    parser.add_argument("--no_compile", action="store_true",
-                       help="Disable torch.compile() (use if training hangs/deadlocks)")
+    parser.add_argument("--compile", action="store_true",
+                       help="Enable torch.compile() for ~2x speedup (may cause CUDA errors with TEN)")
     parser.add_argument("--gradient_checkpointing", action="store_true",
                        help="Enable gradient checkpointing to reduce memory (trades compute for memory)")
     
