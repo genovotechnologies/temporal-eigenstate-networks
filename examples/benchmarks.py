@@ -47,8 +47,8 @@ class StandardAttention(torch.nn.Module):
 
 def benchmark_attention_mechanisms(
     seq_lengths: List[int],
-    d_model: int = 512,
-    n_heads: int = 8,
+    dim: int = 512,
+    num_eigenstates: int = 128,
     batch_size: int = 16,
     num_runs: int = 10,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -58,9 +58,15 @@ def benchmark_attention_mechanisms(
     print(f"Running benchmarks on {device}...")
     
     # Create models
-    config = TemporalEigenstateConfig(d_model=d_model, n_heads=n_heads, n_layers=1)
+    config = TemporalEigenstateConfig(
+        vocab_size=50000,
+        dim=dim,
+        num_eigenstates=num_eigenstates,
+        n_layers=1,
+        max_seq_len=max(seq_lengths),
+    )
     ten_model = TemporalEigenstateNetwork(config).to(device)
-    standard_model = StandardAttention(d_model, n_heads).to(device)
+    standard_model = StandardAttention(dim, num_eigenstates // 8).to(device)
     
     results = {
         "seq_lengths": seq_lengths,
@@ -74,7 +80,7 @@ def benchmark_attention_mechanisms(
         print(f"\nBenchmarking sequence length: {seq_len}")
         
         # Create input
-        x = torch.randn(batch_size, seq_len, d_model).to(device)
+        x = torch.randn(batch_size, seq_len, dim).to(device)
         
         # Benchmark TEN
         ten_model.eval()
