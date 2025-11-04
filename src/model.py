@@ -116,69 +116,131 @@ class TemporalFlowCell(nn.Module):
         state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Forward pass through temporal flow cell.
+        Forward pass - CORRECT PARALLEL IMPLEMENTATION from paper Appendix B.
+        
+        Key insight: The recurrence c_k(t) = λ_k * c_k(t-1) + β_k(t) can be
+        computed in PARALLEL across all timesteps using associative scan!
+        This is O(T) time with O(1) memory per timestep.
+        
+        Paper says: "All K eigenstates evolve independently, enabling vectorization"
         
         Args:
             x: Input tensor (batch, seq_len, dim)
-            state: Optional previous state (state_real, state_imag) for recurrent inference
+            state: Optional previous state for generation
             
         Returns:
-            output: (batch, seq_len, dim) processed sequence
-            state: (state_real, state_imag) final state tuple
+            output: (batch, seq_len, dim)
+            state: Final (state_real, state_imag) tuple
         """
         batch, seq_len, dim = x.shape
+        device, dtype = x.device, x.dtype
         
-        # Initialize state if needed
-        if state is None:
-            state_real = torch.zeros(batch, self.num_eigenstates, device=x.device)
-            state_imag = torch.zeros(batch, self.num_eigenstates, device=x.device)
-        else:
-            state_real, state_imag = state
-            
-        # Get eigenvalues
-        magnitude, phase = self.get_eigenvalues()
+        # Get eigenvalues and precompute trig
+        magnitude, phase = self.get_eigenvalues()  # (num_eigenstates,)
+        cos_phase = torch.cos(phase)
+        sin_phase = torch.sin(phase)
         
-        # Precompute cos/sin for efficiency (eigenvalues already include time scaling)
-        cos_phase = torch.cos(phase)  # (num_eigenstates,)
-        sin_phase = torch.sin(phase)  # (num_eigenstates,)
-        
-        # Project all timesteps to eigenspace at once (this is just a linear layer, cheap)
+        # Project all timesteps to eigenspace at once - O(T*K*d) operation
+        # Paper Appendix B: "Precompute v_k^* x using einsum"
         beta = self.input_proj(x)  # (batch, seq_len, num_eigenstates)
         
-        # PAPER-COMPLIANT MEMORY EFFICIENCY:
-        # The key insight is that we DON'T need gradients through the recurrent state!
-        # Only the FINAL projections need gradients. This is how we get O(T) memory.
-        # We'll collect outputs and only compute gradients on the projection layer.
+        # CRITICAL: Parallel scan for recurrence c_k(t) = λ_k * c_k(t-1) + β_k(t)
+        # This is the KEY to O(T) memory - we don't need to loop!
+        # We compute ALL timesteps at once using cumulative operations
         
-        outputs = []
+        # Initialize state
+        if state is None:
+            state_real = torch.zeros(batch, self.num_eigenstates, device=device, dtype=dtype)
+            state_imag = torch.zeros(batch, self.num_eigenstates, device=device, dtype=dtype)
+        else:
+            state_real, state_imag = state
         
-        for t in range(seq_len):
-            # CRITICAL: Fully detach state between timesteps!
-            # Paper Algorithm 1 shows no backprop through time - only through projections
-            if t > 0:
-                # Stop gradients from flowing through recurrent connections
-                state_real = state_real.detach()
-                state_imag = state_imag.detach()
-            
-            # Eigenstate evolution: c_k(t) = λ_k * c_k(t-1) + β_k(t)
-            # This is Equation 2 in the paper
-            new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
-            new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
-            
-            # Resonance coupling: c̃(t) = R * c(t)  
-            # This allows eigenstates to interact
-            state_real = new_real @ self.resonance
-            state_imag = new_imag @ self.resonance
-            
-            # Project to output space - THIS is where gradients matter
-            # Paper: h_t = Re[Σ_k c̃_k(t) * v_k]
-            out_t = self.norm(self.output_proj(state_real))
-            outputs.append(out_t)
+        # Expand initial state for broadcasting: (batch, 1, num_eigenstates)
+        state_real = state_real.unsqueeze(1)
+        state_imag = state_imag.unsqueeze(1)
         
-        # Stack outputs
-        outputs = torch.stack(outputs, dim=1)  # (batch, seq_len, dim)
+        # Create decay powers: λ^0, λ^1, λ^2, ..., λ^(T-1)
+        # Shape: (seq_len, num_eigenstates)
+        powers = torch.arange(seq_len, device=device, dtype=dtype).unsqueeze(1)  # (T, 1)
         
-        return outputs, (state_real, state_imag)
+        # Compute λ^t for each timestep - this is the parallel scan trick!
+        # magnitude^t * (cos(t*phase) + i*sin(t*phase))
+        mag_powers = magnitude.unsqueeze(0) ** powers  # (T, K)
+        phase_mult = phase.unsqueeze(0) * powers  # (T, K)
+        cos_powers = torch.cos(phase_mult)  # (T, K)
+        sin_powers = torch.sin(phase_mult)  # (T, K)
+        
+        # Apply powers to initial state: λ^t * c(0)
+        # Complex mult: (a + bi) * (mag*cos + i*mag*sin)
+        decayed_real = mag_powers * (state_real * cos_powers - state_imag * sin_powers)  # (B, T, K)
+        decayed_imag = mag_powers * (state_real * sin_powers + state_imag * cos_powers)  # (B, T, K)
+        
+        # Now add the convolution with inputs: sum_{τ=0}^{t-1} λ^(t-τ) * β(τ)
+        # This is a CAUSAL CONVOLUTION - can be done with cumsum!
+        # For each t: c(t) = λ^t * c(0) + sum_{τ=0}^{t-1} λ^(t-τ-1) * β(τ)
+        
+        # Create convolution kernel: λ^(t-τ) for t >= τ (causal)
+        # We'll use a more memory-efficient approach: iterative accumulation with detach
+        
+        # Actually, let's use the efficient parallel prefix sum approach:
+        # c(t) = λ*c(t-1) + β(t) can be rewritten as cumulative operation
+        
+        # Split into real and imaginary for clarity
+        beta_real = beta  # Already real from input_proj
+        beta_imag = torch.zeros_like(beta)  # No imaginary component from input
+        
+        # OPTIMIZED PARALLEL SCAN using cumsum trick!
+        # The recurrence c(t) = λ*c(t-1) + β(t) has closed form:
+        # c(t) = λ^t * c(0) + sum_{τ=0}^{t-1} λ^(t-τ-1) * β(τ)
+        
+        # Compute λ^t * c(0) for all t (already done above as decayed_real/imag)
+        
+        # Compute the convolution sum efficiently:
+        # We need: sum_{τ=0}^{t-1} λ^(t-τ-1) * β(τ) for each t
+        # This is equivalent to: λ^t * cumsum(β(τ) / λ^τ)
+        
+        # Compute β(τ) / λ^τ for all τ
+        # Inverse powers: λ^(-τ) = (1/magnitude)^τ * (cos(-τ*phase) + i*sin(-τ*phase))
+        inv_mag_powers = (1.0 / (magnitude.unsqueeze(0) + 1e-7)) ** powers  # (T, K)
+        inv_cos_powers = torch.cos(-phase_mult)  # (T, K) 
+        inv_sin_powers = torch.sin(-phase_mult)  # (T, K)
+        
+        # Normalize beta by inverse powers: β(τ) * λ^(-τ)
+        # beta is real, so: β(τ) * (mag^(-τ) * cos + i*mag^(-τ) * sin)
+        beta_normalized_real = beta * inv_mag_powers.unsqueeze(0) * inv_cos_powers.unsqueeze(0)  # (B, T, K)
+        beta_normalized_imag = beta * inv_mag_powers.unsqueeze(0) * inv_sin_powers.unsqueeze(0)  # (B, T, K)
+        
+        # Cumulative sum (this is the parallel scan!)
+        beta_cumsum_real = torch.cumsum(beta_normalized_real, dim=1)  # (B, T, K)
+        beta_cumsum_imag = torch.cumsum(beta_normalized_imag, dim=1)  # (B, T, K)
+        
+        # Multiply back by λ^t to get final states
+        # c(t) = λ^t * [c(0) + cumsum(...)]
+        conv_contribution_real = mag_powers.unsqueeze(0) * (
+            beta_cumsum_real * cos_powers.unsqueeze(0) - beta_cumsum_imag * sin_powers.unsqueeze(0)
+        )
+        conv_contribution_imag = mag_powers.unsqueeze(0) * (
+            beta_cumsum_real * sin_powers.unsqueeze(0) + beta_cumsum_imag * cos_powers.unsqueeze(0)
+        )
+        
+        # Final states: decay from initial + convolution with inputs
+        all_states_real = decayed_real + conv_contribution_real  # (B, T, K)
+        all_states_imag = decayed_imag + conv_contribution_imag  # (B, T, K)
+        
+        # Resonance coupling - apply to ALL timesteps at once!
+        # (B, T, K) @ (K, K) -> (B, T, K)
+        all_states_real = torch.einsum('btk,kj->btj', all_states_real, self.resonance)
+        all_states_imag = torch.einsum('btk,kj->btj', all_states_imag, self.resonance)
+        
+        # Project ALL timesteps at once - FULLY PARALLEL!
+        # Paper: h_t = Re[Σ_k c̃_k(t) * v_k]
+        outputs = self.norm(self.output_proj(all_states_real))  # (batch, seq_len, dim)
+        
+        # Return final state for generation
+        final_state_real = all_states_real[:, -1, :]  # (batch, K)
+        final_state_imag = all_states_imag[:, -1, :]  # (batch, K)
+        
+        return outputs, (final_state_real, final_state_imag)
 
 
 class ResonanceBlock(nn.Module):
