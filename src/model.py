@@ -113,18 +113,25 @@ class TemporalFlowCell(nn.Module):
     def forward(
         self, 
         x: torch.Tensor, 
-        state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        states: Optional[List] = None,
+        return_states: bool = False,
+        skip_output_projection: bool = False
+    ) -> torch.Tensor:
         """
-        Forward pass through temporal flow cell.
+        Forward pass.
         
         Args:
-            x: Input tensor (batch, seq_len, dim)
-            state: Optional previous state (real, imag) each (batch, num_eigenstates)
+            x: Input tensor. Either:
+               - Token indices (batch, seq_len) if model has embedding layer
+               - Continuous features (batch, seq_len, dim) otherwise
+            states: Optional previous states for recurrent inference
+            return_states: Whether to return final states
+            skip_output_projection: Skip vocab projection to save memory (for training)
             
         Returns:
-            output: (batch, seq_len, dim)
-            state: New state tuple (real, imag)
+            output: (batch, seq_len, dim) if skip_output_projection=True
+                    or (batch, seq_len, vocab_size) if skip_output_projection=False
+            states: (optional) Final states if return_states=True
         """
         batch, seq_len, dim = x.shape
         
@@ -432,8 +439,8 @@ class TemporalEigenstateNetwork(nn.Module):
         # Final norm
         x = self.norm(x)
         
-        # Project to vocabulary if output layer exists
-        if hasattr(self, 'output') and self.output is not None:
+        # Project to vocabulary if output layer exists (skip during training to save memory)
+        if not skip_output_projection and hasattr(self, 'output') and self.output is not None:
             x = self.output(x)  # (batch, seq_len, vocab_size)
         
         if return_states:

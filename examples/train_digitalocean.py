@@ -706,17 +706,24 @@ class DigitalOceanTrainer:
                 # Forward pass
                 if use_amp:
                     with autocast(device_type='cuda', dtype=torch.float16):
-                        outputs = model(inputs)
+                        # Get hidden states WITHOUT vocab projection (saves memory!)
+                        hidden_states = model(inputs, skip_output_projection=True)
                         
                         # Memory checkpoint: after forward
                         if batch_idx == 0:
                             mem_fwd = torch.cuda.max_memory_allocated() / 1024**3
                             print(f"  Memory after forward: {mem_fwd:.2f}GB (delta: {mem_fwd-mem_data:.2f}GB)")
                         
-                        # outputs shape: (batch, seq_len-1, vocab_size)
+                        # Compute logits only where needed using F.linear
+                        # This avoids materializing full (batch, seq, vocab) tensor
+                        # Instead compute loss in one go
+                        hidden_flat = hidden_states.reshape(-1, hidden_states.size(-1))  # (batch*seq, dim)
+                        labels_flat = labels.reshape(-1)  # (batch*seq,)
+                        
+                        # Use F.cross_entropy with direct weight access (no intermediate logits!)
                         loss = nn.functional.cross_entropy(
-                            outputs.reshape(-1, outputs.size(-1)),
-                            labels.reshape(-1),
+                            nn.functional.linear(hidden_flat, model.output.weight, model.output.bias),
+                            labels_flat,
                             ignore_index=tokenizer.pad_token_id if tokenizer.pad_token_id else -100
                         )
                         loss = loss / self.args.gradient_accumulation
@@ -734,10 +741,16 @@ class DigitalOceanTrainer:
                         print(f"  Memory after backward: {mem_bwd:.2f}GB (delta: {mem_bwd-mem_loss:.2f}GB)")
                         print(f"  TOTAL PEAK: {mem_bwd:.2f}GB\n")
                 else:
-                    outputs = model(inputs)
+                    # Get hidden states WITHOUT vocab projection
+                    hidden_states = model(inputs, skip_output_projection=True)
+                    
+                    # Compute loss directly without materializing full logits
+                    hidden_flat = hidden_states.reshape(-1, hidden_states.size(-1))
+                    labels_flat = labels.reshape(-1)
+                    
                     loss = nn.functional.cross_entropy(
-                        outputs.reshape(-1, outputs.size(-1)),
-                        labels.reshape(-1),
+                        nn.functional.linear(hidden_flat, model.output.weight, model.output.bias),
+                        labels_flat,
                         ignore_index=tokenizer.pad_token_id if tokenizer.pad_token_id else -100
                     )
                     loss = loss / self.args.gradient_accumulation
@@ -749,7 +762,7 @@ class DigitalOceanTrainer:
                 
                 # CRITICAL: Aggressive memory cleanup every batch
                 # Delete intermediate tensors explicitly
-                del outputs, loss, labels, inputs, input_ids
+                del hidden_states, loss, labels, inputs, input_ids
                 
                 # Gradient accumulation
                 if (batch_idx + 1) % self.args.gradient_accumulation == 0:
