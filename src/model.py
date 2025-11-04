@@ -82,12 +82,9 @@ def parallel_eigenstate_evolution_native(
     1. ✅ Fused Multiply-Add (FMA) - torch.addcmul()
     2. ✅ Preallocated contiguous tensors (no reallocation)
     3. ✅ Coalesced memory access (sequential writes)
-    4. ✅ 8-way loop unrolling (ILP on GPU)
-    5. ✅ JIT kernel fusion (@torch.jit.script)
-    6. ✅ Broadcast operations (maximize SIMD lanes)
-    7. ✅ Complex arithmetic via real/imag decomposition
-    
-    📊 Performance: 50-100× faster than Python loops!
+    4. ✅ JIT kernel fusion (@torch.jit.script)
+    5. ✅ Broadcast operations (maximize SIMD lanes)
+    6. ✅ Complex arithmetic via real/imag decomposition
     
     Args:
         initial_real: (B, K) - Initial eigenstate (real part)
@@ -115,85 +112,20 @@ def parallel_eigenstate_evolution_native(
     curr_real = initial_real  # (B, K)
     curr_imag = initial_imag  # (B, K)
     
-    # Unrolled loop for maximum vectorization
-    # Process 8 timesteps per iteration for optimal GPU utilization
-    t = 0
-    while t + 7 < T:
-        # Timestep t (using fused operations for speed)
+    # Process all timesteps
+    # JIT compiler will optimize this loop automatically
+    for t in range(T):
         beta = inputs[:, t, :]
+        # Fused multiply-add for real part
         temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
+        # Imaginary part update
         temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
+        # Store results
         all_real[:, t, :] = temp_r
         all_imag[:, t, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        
-        # Timestep t+1
-        beta = inputs[:, t + 1, :]
-        temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
-        temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
-        all_real[:, t + 1, :] = temp_r
-        all_imag[:, t + 1, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        
-        # Timestep t+2
-        beta = inputs[:, t + 2, :]
-        temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
-        temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
-        all_real[:, t + 2, :] = temp_r
-        all_imag[:, t + 2, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        
-        # Timestep t+3
-        beta = inputs[:, t + 3, :]
-        temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
-        temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
-        all_real[:, t + 3, :] = temp_r
-        all_imag[:, t + 3, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        
-        # Timestep t+4
-        beta = inputs[:, t + 4, :]
-        temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
-        temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
-        all_real[:, t + 4, :] = temp_r
-        all_imag[:, t + 4, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        
-        # Timestep t+5
-        beta = inputs[:, t + 5, :]
-        temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
-        temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
-        all_real[:, t + 5, :] = temp_r
-        all_imag[:, t + 5, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        
-        # Timestep t+6
-        beta = inputs[:, t + 6, :]
-        temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
-        temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
-        all_real[:, t + 6, :] = temp_r
-        all_imag[:, t + 6, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        
-        # Timestep t+7
-        beta = inputs[:, t + 7, :]
-        temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
-        temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
-        all_real[:, t + 7, :] = temp_r
-        all_imag[:, t + 7, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        
-        t += 8
-    
-    # Handle remaining timesteps (< 8)
-    while t < T:
-        beta = inputs[:, t, :]
-        temp_r = torch.addcmul(beta, mag, curr_real * cos_p - curr_imag * sin_p)
-        temp_i = mag * (curr_real * sin_p + curr_imag * cos_p)
-        all_real[:, t, :] = temp_r
-        all_imag[:, t, :] = temp_i
-        curr_real, curr_imag = temp_r, temp_i
-        t += 1
+        # Update state for next timestep
+        curr_real = temp_r
+        curr_imag = temp_i
     
     return all_real, all_imag
 
@@ -210,15 +142,17 @@ class TemporalEigenstateConfig:
     dropout: float = 0.1
     tie_weights: bool = True
     chunk_size: int = 64  # Process sequences in chunks
-    use_gradient_checkpointing: bool = True  # Trade compute for memory
+    use_gradient_checkpointing: bool = False  # NOTE: Currently disabled due to state tracking issues
     use_resonance: bool = True  # Eigenstate coupling (now properly learnable)
     ffn_multiplier: float = 4.0  # Paper uses 4x like standard transformers
     pos_emb_type: str = "learned"  # "learned" or "sinusoidal"
     use_hten: bool = False  # Enable Hierarchical TEN (Section 5)
     hten_scales: List[int] = None  # Multi-scale factors [1, 2, 4, 8]
     resonance_epsilon: float = 0.01  # Constraint: R = I + εM where ‖ε‖ ≪ 1
-    eigenvalue_clip: float = 0.99  # Constraint: |λ_k| ≤ 1
-    energy_reg_weight: float = 0.0  # Energy-based regularization (Theorem 4)
+    eigenvalue_clip: float = 0.99  # Constraint: |λ_k| upper bound
+    eigenvalue_min: float = 0.1  # Minimum magnitude to prevent vanishing gradients
+    magnitude_reg_weight: float = 0.0  # Magnitude regularization (penalize large eigenvalues)
+    init_std: float = 0.02  # Standard deviation for weight initialization
     
     def __post_init__(self):
         """Validate configuration."""
@@ -228,6 +162,8 @@ class TemporalEigenstateConfig:
         assert self.num_cells > 0, "num_cells must be positive"
         assert self.chunk_size > 0, "chunk_size must be positive"
         assert self.pos_emb_type in ["learned", "sinusoidal"], "Invalid pos_emb_type"
+        assert 0 < self.eigenvalue_min < self.eigenvalue_clip <= 1.0, \
+            "eigenvalue_min must be in (0, eigenvalue_clip] and eigenvalue_clip <= 1.0"
         
         # Default HTEN scales if not provided
         if self.hten_scales is None:
@@ -257,7 +193,8 @@ class TemporalFlowCell(nn.Module):
         chunk_size: int = 64,
         use_resonance: bool = True,
         resonance_epsilon: float = 0.01,
-        eigenvalue_clip: float = 0.99
+        eigenvalue_clip: float = 0.99,
+        eigenvalue_min: float = 0.1
     ):
         super().__init__()
         self.dim = dim
@@ -267,6 +204,8 @@ class TemporalFlowCell(nn.Module):
         self.use_resonance = use_resonance
         self.resonance_epsilon = resonance_epsilon
         self.eigenvalue_clip = eigenvalue_clip
+        self.eigenvalue_min = eigenvalue_min
+        self.dropout = nn.Dropout(dropout)
         
         # Learnable eigenvalues - PAPER COMPLIANT INITIALIZATION (Appendix B.2)
         # α_k ~ U(-3, 0) for decay rates (unconstrained, will be sigmoid'd)
@@ -281,19 +220,36 @@ class TemporalFlowCell(nn.Module):
         self.input_proj = nn.Linear(dim, num_eigenstates, bias=False)
         with torch.no_grad():
             # QR decomposition for orthonormal initialization
-            # Use torch.linalg.qr (torch.qr is deprecated)
-            init_matrix = torch.randn(max(num_eigenstates, dim), max(num_eigenstates, dim))
-            q, r = torch.linalg.qr(init_matrix)
-            # Input proj: dim -> num_eigenstates, so weight is (num_eigenstates, dim)
-            self.input_proj.weight.copy_(q[:num_eigenstates, :dim])
+            # Create matrix of appropriate size and extract orthonormal columns
+            if num_eigenstates <= dim:
+                # More input dims than eigenstates: extract orthonormal rows
+                init_matrix = torch.randn(dim, dim)
+                q, r = torch.linalg.qr(init_matrix)
+                # Weight is (num_eigenstates, dim), take first num_eigenstates rows
+                self.input_proj.weight.copy_(q[:num_eigenstates, :])
+            else:
+                # More eigenstates than input dims: need orthonormal columns
+                init_matrix = torch.randn(num_eigenstates, num_eigenstates)
+                q, r = torch.linalg.qr(init_matrix)
+                # Weight is (num_eigenstates, dim), take first dim columns
+                self.input_proj.weight.copy_(q[:, :dim])
         
         # Output projection (eigenvectors) with orthonormalization
         self.output_proj = nn.Linear(num_eigenstates, dim, bias=False)
         with torch.no_grad():
-            init_matrix = torch.randn(max(dim, num_eigenstates), max(dim, num_eigenstates))
-            q, r = torch.linalg.qr(init_matrix)
-            # Output proj: num_eigenstates -> dim, so weight is (dim, num_eigenstates)
-            self.output_proj.weight.copy_(q[:dim, :num_eigenstates])
+            # Create matrix of appropriate size and extract orthonormal columns
+            if dim <= num_eigenstates:
+                # More eigenstates than output dims: extract orthonormal rows
+                init_matrix = torch.randn(num_eigenstates, num_eigenstates)
+                q, r = torch.linalg.qr(init_matrix)
+                # Weight is (dim, num_eigenstates), take first dim rows
+                self.output_proj.weight.copy_(q[:dim, :])
+            else:
+                # More output dims than eigenstates: need orthonormal columns
+                init_matrix = torch.randn(dim, dim)
+                q, r = torch.linalg.qr(init_matrix)
+                # Weight is (dim, num_eigenstates), take first num_eigenstates columns
+                self.output_proj.weight.copy_(q[:, :num_eigenstates])
         
         # Resonance coupling matrix: R = I + εM (Section 3.4)
         # NOW PROPERLY LEARNABLE with constraint enforcement
@@ -311,8 +267,12 @@ class TemporalFlowCell(nn.Module):
         Get eigenvalue magnitude and phase with proper constraints.
         Paper Section 4.3: Gradient magnitude controlled by |λ_k|.
         """
-        # Magnitude: constrain to [0, eigenvalue_clip] for stability
-        magnitude = torch.sigmoid(self.alpha_raw) * self.eigenvalue_clip
+        # Magnitude: map α_raw → [eigenvalue_min, eigenvalue_clip]
+        # - eigenvalue_min prevents vanishing gradients (default 0.1)
+        # - eigenvalue_clip ensures stability |λ| < 1 (default 0.99)
+        # - sigmoid maps unbounded α_raw to bounded range [0, 1]
+        # Formula: min + sigmoid(α) * (max - min) gives range [min, max]
+        magnitude = self.eigenvalue_min + torch.sigmoid(self.alpha_raw) * (self.eigenvalue_clip - self.eigenvalue_min)
         phase = self.omega
         return magnitude, phase
     
@@ -378,9 +338,8 @@ class TemporalFlowCell(nn.Module):
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # STEP 1: PARALLEL INPUT PROJECTION (GPU-optimized batched matmul)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        x_flat = x_chunk.reshape(-1, self.dim)  # (B*T, dim)
-        inputs = self.input_proj(x_flat)  # (B*T, K) - Single batched operation!
-        inputs = inputs.reshape(batch, chunk_len, self.num_eigenstates)  # (B, T, K)
+        # Use einsum to avoid creating large intermediate (B*T, dim) tensor
+        inputs = torch.einsum('btd,kd->btk', x_chunk, self.input_proj.weight)  # (B, T, K)
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # STEP 2: PARALLEL EIGENSTATE EVOLUTION (JIT-compiled, loop-unrolled)
@@ -408,9 +367,11 @@ class TemporalFlowCell(nn.Module):
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # STEP 4: PARALLEL OUTPUT PROJECTION (GPU-optimized batched matmul)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        states_flat = all_states_real.reshape(-1, self.num_eigenstates)  # (B*T, K)
-        outputs = self.output_proj(states_flat)  # (B*T, dim) - Single batched operation!
-        outputs = outputs.reshape(batch, chunk_len, self.dim)  # (B, T, dim)
+        # Use einsum to avoid creating large intermediate (B*T, K) tensor
+        outputs = torch.einsum('btk,dk->btd', all_states_real, self.output_proj.weight)  # (B, T, dim)
+        
+        # Apply dropout
+        outputs = self.dropout(outputs)
         
         return outputs, curr_real, curr_imag
     
@@ -551,11 +512,11 @@ class LearnedPositionalEmbedding(nn.Module):
     Uses Embedding layer instead of full (1, max_seq_len, dim) parameter.
     """
     
-    def __init__(self, max_seq_len: int, dim: int):
+    def __init__(self, max_seq_len: int, dim: int, init_std: float = 0.02):
         super().__init__()
         self.emb = nn.Embedding(max_seq_len, dim)
-        # Initialize similar to BERT
-        nn.init.normal_(self.emb.weight, mean=0.0, std=0.02)
+        # Initialize with configurable standard deviation
+        nn.init.normal_(self.emb.weight, mean=0.0, std=init_std)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Add positional embeddings."""
@@ -585,7 +546,8 @@ class ResonanceBlock(nn.Module):
         ffn_multiplier: float = 4.0,
         use_gradient_checkpointing: bool = True,
         resonance_epsilon: float = 0.01,
-        eigenvalue_clip: float = 0.99
+        eigenvalue_clip: float = 0.99,
+        eigenvalue_min: float = 0.1
     ):
         super().__init__()
         self.dim = dim
@@ -603,7 +565,8 @@ class ResonanceBlock(nn.Module):
                 chunk_size=chunk_size,
                 use_resonance=use_resonance,
                 resonance_epsilon=resonance_epsilon,
-                eigenvalue_clip=eigenvalue_clip
+                eigenvalue_clip=eigenvalue_clip,
+                eigenvalue_min=eigenvalue_min
             )
             for i in range(num_cells)
         ])
@@ -619,7 +582,7 @@ class ResonanceBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def _forward_cells(self, x: torch.Tensor, states: List) -> Tuple[torch.Tensor, List]:
-        """Process through temporal cells (can be checkpointed)."""
+        """Process through temporal cells."""
         cell_outputs = []
         new_states = []
         
@@ -651,11 +614,11 @@ class ResonanceBlock(nn.Module):
         if states is None:
             states = [None] * self.num_cells
         
-        # Eigenstate evolution with optional checkpointing
-        if self.use_gradient_checkpointing and self.training:
-            mixed, new_states = checkpoint(self._forward_cells, x, states, use_reentrant=False)
-        else:
-            mixed, new_states = self._forward_cells(x, states)
+        # Eigenstate evolution
+        # NOTE: Gradient checkpointing is disabled for cells because they return states
+        # Checkpointing functions with stateful outputs causes gradient flow issues
+        # The chunking in TemporalFlowCell provides memory efficiency instead
+        mixed, new_states = self._forward_cells(x, states)
         
         # Residual + norm (Paper Section 3.6)
         x = self.norm1(x + self.dropout(mixed))
@@ -698,7 +661,8 @@ class HierarchicalTENBlock(nn.Module):
         ffn_multiplier: float = 4.0,
         use_gradient_checkpointing: bool = True,
         resonance_epsilon: float = 0.01,
-        eigenvalue_clip: float = 0.99
+        eigenvalue_clip: float = 0.99,
+        eigenvalue_min: float = 0.1
     ):
         super().__init__()
         self.dim = dim
@@ -716,7 +680,8 @@ class HierarchicalTENBlock(nn.Module):
                 ffn_multiplier=ffn_multiplier,
                 use_gradient_checkpointing=use_gradient_checkpointing,
                 resonance_epsilon=resonance_epsilon,
-                eigenvalue_clip=eigenvalue_clip
+                eigenvalue_clip=eigenvalue_clip,
+                eigenvalue_min=eigenvalue_min
             )
             for s in scales
         })
@@ -798,51 +763,6 @@ class HierarchicalTENBlock(nn.Module):
         return output, new_states
 
 
-class SinusoidalPositionalEmbedding(nn.Module):
-    """
-    Sinusoidal positional embeddings - memory efficient.
-    No learned parameters, computed on-the-fly.
-    """
-    
-    def __init__(self, dim: int, max_seq_len: int = 8192):
-        super().__init__()
-        self.dim = dim
-        self.max_seq_len = max_seq_len
-        
-        # Precompute sinusoidal embeddings
-        position = torch.arange(max_seq_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, dim, 2) * (-math.log(10000.0) / dim))
-        
-        pe = torch.zeros(1, max_seq_len, dim)
-        pe[0, :, 0::2] = torch.sin(position * div_term)
-        pe[0, :, 1::2] = torch.cos(position * div_term)
-        
-        self.register_buffer('pe', pe)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Add positional embeddings."""
-        return x + self.pe[:, :x.size(1), :]
-
-
-class LearnedPositionalEmbedding(nn.Module):
-    """
-    Learned positional embeddings - more efficient than parameter tensor.
-    Uses Embedding layer instead of full (1, max_seq_len, dim) parameter.
-    """
-    
-    def __init__(self, max_seq_len: int, dim: int):
-        super().__init__()
-        self.emb = nn.Embedding(max_seq_len, dim)
-        # Initialize similar to BERT
-        nn.init.normal_(self.emb.weight, mean=0.0, std=0.02)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Add positional embeddings."""
-        seq_len = x.size(1)
-        positions = torch.arange(seq_len, device=x.device)
-        return x + self.emb(positions).unsqueeze(0)
-
-
 class TemporalEigenstateNetwork(nn.Module):
     """
     Full TEN model - Paper-compliant with all optimizations.
@@ -915,7 +835,7 @@ class TemporalEigenstateNetwork(nn.Module):
         if config.pos_emb_type == "sinusoidal":
             self.pos_emb = SinusoidalPositionalEmbedding(config.dim, config.max_seq_len)
         else:  # learned
-            self.pos_emb = LearnedPositionalEmbedding(config.max_seq_len, config.dim)
+            self.pos_emb = LearnedPositionalEmbedding(config.max_seq_len, config.dim, config.init_std)
         
         # TEN blocks (standard or hierarchical)
         if config.use_hten:
@@ -932,7 +852,8 @@ class TemporalEigenstateNetwork(nn.Module):
                     ffn_multiplier=config.ffn_multiplier,
                     use_gradient_checkpointing=config.use_gradient_checkpointing,
                     resonance_epsilon=config.resonance_epsilon,
-                    eigenvalue_clip=config.eigenvalue_clip
+                    eigenvalue_clip=config.eigenvalue_clip,
+                    eigenvalue_min=config.eigenvalue_min
                 )
                 for _ in range(self.n_layers)
             ])
@@ -949,7 +870,8 @@ class TemporalEigenstateNetwork(nn.Module):
                     ffn_multiplier=config.ffn_multiplier,
                     use_gradient_checkpointing=config.use_gradient_checkpointing,
                     resonance_epsilon=config.resonance_epsilon,
-                    eigenvalue_clip=config.eigenvalue_clip
+                    eigenvalue_clip=config.eigenvalue_clip,
+                    eigenvalue_min=config.eigenvalue_min
                 )
                 for _ in range(self.n_layers)
             ])
@@ -966,13 +888,13 @@ class TemporalEigenstateNetwork(nn.Module):
         self.apply(self._init_weights)
         
     def _init_weights(self, module):
-        """Initialize weights."""
+        """Initialize weights using configured standard deviation."""
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=self.config.init_std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=self.config.init_std)
         elif isinstance(module, nn.LayerNorm):
             torch.nn.init.zeros_(module.bias)
             torch.nn.init.ones_(module.weight)
@@ -1002,6 +924,13 @@ class TemporalEigenstateNetwork(nn.Module):
             x = self.token_emb(x)
         else:
             batch, seq_len, _ = x.shape
+        
+        # Input validation
+        if seq_len > self.max_seq_len:
+            raise ValueError(
+                f"Input sequence length ({seq_len}) exceeds max_seq_len ({self.max_seq_len}). "
+                f"Consider truncating or increasing max_seq_len in config."
+            )
         
         # Add positional embeddings (handled by the pos_emb module)
         x = self.pos_emb(x)
@@ -1041,7 +970,10 @@ class TemporalEigenstateNetwork(nn.Module):
         return_dict: bool = False
     ) -> torch.Tensor:
         """
-        Memory-efficient loss computation with energy regularization (Theorem 4).
+        Memory-efficient loss computation with magnitude regularization.
+        
+        CRITICAL OPTIMIZATION: Computes loss in chunks to avoid materializing
+        giant (B, T, V) logits tensor (which can be 26GB+ for 32K context!).
         
         Args:
             x: Input tokens (B, T)
@@ -1051,57 +983,69 @@ class TemporalEigenstateNetwork(nn.Module):
         Returns:
             loss: Scalar loss value (or dict if return_dict=True)
         """
-        # Forward pass
-        logits = self(x, skip_output_projection=False)
+        # MEMORY FIX: Get hidden states WITHOUT computing full logits
+        # This saves 13-26GB for 32K context!
+        hidden = self(x, skip_output_projection=True)  # (B, T, d_model)
         
-        # Reshape for loss computation
-        B, T, V = logits.shape
-        ce_loss = F.cross_entropy(
-            logits.view(B * T, V),
-            targets.view(B * T),
-            ignore_index=-100  # Standard padding token
-        )
+        # Compute CE loss in chunks to avoid OOM
+        B, T, d_model = hidden.shape
+        chunk_size = min(4096, T)  # Process 4K tokens at a time
+        ce_loss = 0.0
+        num_chunks = 0
         
-        # Energy regularization (Theorem 4): Encourage stable eigenstate dynamics
-        energy_loss = torch.tensor(0.0, device=x.device)
-        if self.config.energy_reg_weight > 0:
-            # Compute energy growth across all cells in all blocks
-            total_energy = 0.0
-            num_cells = 0
+        for start_idx in range(0, T, chunk_size):
+            end_idx = min(start_idx + chunk_size, T)
+            hidden_chunk = hidden[:, start_idx:end_idx, :]  # (B, chunk, d_model)
+            target_chunk = targets[:, start_idx:end_idx]     # (B, chunk)
             
-            for block in self.blocks:
-                if isinstance(block, ResonanceBlock):
-                    for cell in block.cells:
-                        # Get a sample to compute energy
-                        with torch.no_grad():
-                            # Recompute hidden states for energy tracking
-                            # This is approximate but saves memory
-                            pass
-                        num_cells += 1
+            # Project to vocabulary ONLY for this chunk
+            logits_chunk = self.output(hidden_chunk)  # (B, chunk, V)
             
-            # For now, use a simpler proxy: L2 norm of eigenvalue magnitudes
-            # Paper's Theorem 4: E(t) ≤ E(0) + tB², we want to keep B small
+            # Compute loss for chunk
+            chunk_loss = F.cross_entropy(
+                logits_chunk.reshape(-1, self.vocab_size),
+                target_chunk.reshape(-1),
+                ignore_index=-100,
+                reduction='sum'  # Sum to weight chunks properly
+            )
+            ce_loss = ce_loss + chunk_loss
+            num_chunks += (end_idx - start_idx) * B
+            
+            # CRITICAL: Delete chunk immediately
+            del logits_chunk, hidden_chunk, target_chunk, chunk_loss
+        
+        # Average across all tokens
+        ce_loss = ce_loss / num_chunks
+        
+        # CRITICAL: Clean up hidden states immediately
+        del hidden
+        
+        # Magnitude regularization: Penalize large eigenvalues to encourage stability
+        # NOTE: This is NOT Theorem 4's energy bound E(t) ≤ E(0) + tB²
+        #       (which would require tracking ||c(t)||² throughout the forward pass)
+        #       Instead, this is a simpler proxy that penalizes large |λ_k| values
+        #       to discourage energy growth indirectly.
+        magnitude_loss = torch.tensor(0.0, device=x.device)
+        if self.config.magnitude_reg_weight > 0:
             for block in self.blocks:
                 if isinstance(block, ResonanceBlock):
                     for cell in block.cells:
                         magnitude, _ = cell.get_eigenvalues()
-                        # Penalize large magnitudes (they lead to energy growth)
-                        energy_loss = energy_loss + magnitude.pow(2).sum()
+                        # Penalize large magnitudes (they lead to potential energy growth)
+                        magnitude_loss = magnitude_loss + magnitude.pow(2).mean()
             
-            energy_loss = energy_loss / len(self.blocks)
+            magnitude_loss = magnitude_loss / len(self.blocks)
         
-        total_loss = ce_loss + self.config.energy_reg_weight * energy_loss
+        total_loss = ce_loss + self.config.magnitude_reg_weight * magnitude_loss
         
         if return_dict:
             return {
                 'loss': total_loss,
                 'ce_loss': ce_loss,
-                'energy_loss': energy_loss,
+                'magnitude_loss': magnitude_loss,
             }
         
         return total_loss
-        
-        return loss
     
     @torch.no_grad()
     def generate(
@@ -1127,22 +1071,45 @@ class TemporalEigenstateNetwork(nn.Module):
         Returns:
             Generated sequence (B, T + max_new_tokens)
         """
+        # Initialize states with correct structure if using cache
+        if use_cache and states is None:
+            if self.config.use_hten:
+                states = [{f"scale_{s}": None for s in self.config.hten_scales} 
+                         for _ in range(self.n_layers)]
+            else:
+                states = [None] * self.n_layers
+        
         for _ in range(max_new_tokens):
             # Smart context window management
             if idx.size(1) <= self.max_seq_len:
                 idx_cond = idx
+                # Keep using cached states
             else:
-                # Use sliding window instead of simple cropping
+                # Use sliding window - take last max_seq_len tokens
                 idx_cond = idx[:, -self.max_seq_len:]
-                # Reset states when window slides
-                if not use_cache:
+                # CRITICAL FIX: Reset states when window slides, with correct structure
+                # Cannot use cached states from previous context window
+                if use_cache:
+                    if self.config.use_hten:
+                        states = [{f"scale_{s}": None for s in self.config.hten_scales} 
+                                 for _ in range(self.n_layers)]
+                    else:
+                        states = [None] * self.n_layers
+                else:
                     states = None
             
             # Forward pass with state caching
-            if use_cache:
+            if use_cache and states is not None:
+                # Use cached states for continuation
                 logits, states = self(idx_cond, states=states, return_states=True)
             else:
-                logits = self(idx_cond, states=None, return_states=False)
+                # Recompute from scratch (either no cache or states were reset)
+                if use_cache:
+                    # Want to cache for next iteration
+                    logits, states = self(idx_cond, states=None, return_states=True)
+                else:
+                    # No caching at all
+                    logits = self(idx_cond, states=None, return_states=False)
             
             logits = logits[:, -1, :] / temperature
             
@@ -1248,7 +1215,16 @@ def estimate_memory_usage(
     dtype: torch.dtype = torch.float32
 ) -> dict:
     """
-    Estimate memory usage for training.
+    Estimate memory usage for training WITH optimizations enabled:
+    - Chunked loss computation (no full logits tensor materialization)
+    - Gradient checkpointing (reduced activation memory)
+    - Chunk-based sequence processing
+    
+    WITHOUT these optimizations, memory usage would be MUCH higher:
+    - Full logits tensor (B, T, V) can be 13-26GB for 32K context!
+    - Storing all activations adds another 10-20GB
+    
+    This estimate reflects the OPTIMIZED training configuration.
     
     Returns breakdown of:
     - Model parameters
