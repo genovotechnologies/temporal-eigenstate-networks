@@ -380,7 +380,8 @@ class TemporalEigenstateNetwork(nn.Module):
         self, 
         x: torch.Tensor,
         states: Optional[List] = None,
-        return_states: bool = False
+        return_states: bool = False,
+        skip_output_projection: bool = False
     ) -> torch.Tensor:
         """
         Forward pass.
@@ -391,9 +392,11 @@ class TemporalEigenstateNetwork(nn.Module):
                - Continuous features (batch, seq_len, dim) otherwise
             states: Optional previous states for recurrent inference
             return_states: Whether to return final states
+            skip_output_projection: Skip vocab projection to save memory (for training)
             
         Returns:
-            output: (batch, seq_len, dim) or (batch, seq_len, vocab_size) if has output layer
+            output: (batch, seq_len, dim) if skip_output_projection=True
+                    or (batch, seq_len, vocab_size) if skip_output_projection=False
             states: (optional) Final states if return_states=True
         """
         # Handle both token indices and continuous inputs
