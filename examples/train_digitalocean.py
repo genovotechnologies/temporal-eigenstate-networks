@@ -128,55 +128,39 @@ CONFIGS = {
         "num_eigenstates": 64,
         "batch_size": 8,  # Very small for memory testing
         "max_seq_len": 512,  # Start tiny
-        "description": "Nano - 25M params - MEMORY TEST",
+        "description": "Nano - 33M params, 512 ctx (~2.9GB) - PROVEN",
     },
     "micro": {
         "d_model": 768,
         "n_layers": 8,
         "num_eigenstates": 96,
         "batch_size": 16,  # Reduced from 32
-        "max_seq_len": 1024,  # Start with 1K to validate
-        "description": "Micro - 70M params (~15 min)",
-    },
-    "tiny": {
-        "d_model": 512,
-        "n_layers": 6,
-        "num_eigenstates": 64,
-        "batch_size": 256,  # Increased from 128 with optimizations
-        "max_seq_len": 2048,
-        "description": "Tiny - 95M params (~20 min)",
+        "max_seq_len": 1024,  # 16K total tokens (~12GB)
+        "description": "Micro - 70M params, 1K ctx (~12GB estimated)",
     },
     "small": {
         "d_model": 1024,
         "n_layers": 12,
         "num_eigenstates": 128,
-        "batch_size": 128,  # Increased from 64 with optimizations
-        "max_seq_len": 8192,
-        "description": "Small - 216M params (~1 hour)",
+        "batch_size": 32,  # 32K total tokens
+        "max_seq_len": 1024,
+        "description": "Small - 216M params, 1K ctx (~24GB estimated)",
     },
     "medium": {
         "d_model": 1536,
         "n_layers": 16,
         "num_eigenstates": 192,
-        "batch_size": 16,  # Conservative for 16K context
-        "max_seq_len": 16384,
-        "description": "Medium - 268M params, 16K context (~2 hours)",
+        "batch_size": 32,  # 32K total tokens
+        "max_seq_len": 1024,
+        "description": "Medium - 268M params, 1K ctx (~36GB estimated)",
     },
     "large": {
         "d_model": 2048,
         "n_layers": 24,
         "num_eigenstates": 256,
-        "batch_size": 32,  # Increased with optimizations
-        "max_seq_len": 32768,
-        "description": "Large - 1.2B params, 32K context (~3 hours)",
-    },
-    "xlarge": {
-        "d_model": 2560,
-        "n_layers": 32,
-        "num_eigenstates": 320,
-        "batch_size": 16,  # Conservative for 32K context
-        "max_seq_len": 32768,
-        "description": "XLarge - 2.4B params, 32K context (~4 hours)",
+        "batch_size": 16,  # 32K total tokens
+        "max_seq_len": 2048,
+        "description": "Large - 1.2B params, 2K ctx (~40GB estimated)",
     },
 }
 
@@ -759,7 +743,9 @@ class DigitalOceanTrainer:
                     loss = loss / self.args.gradient_accumulation
                     loss.backward()
                 
-                epoch_loss += loss.item() * self.args.gradient_accumulation
+                # Store loss value before deleting tensor
+                loss_value = loss.item() * self.args.gradient_accumulation
+                epoch_loss += loss_value
                 
                 # CRITICAL: Aggressive memory cleanup every batch
                 # Delete intermediate tensors explicitly
@@ -784,7 +770,7 @@ class DigitalOceanTrainer:
                 
                 # Update progress bar
                 progress_bar.set_postfix({
-                    'loss': f'{loss.item() * self.args.gradient_accumulation:.4f}',
+                    'loss': f'{loss_value:.4f}',
                     'lr': f'{scheduler.get_last_lr()[0]:.2e}'
                 })
                 
