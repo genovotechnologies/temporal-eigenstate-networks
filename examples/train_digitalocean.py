@@ -348,7 +348,7 @@ class DigitalOceanTrainer:
             loss_dict = model.compute_loss(test_input, test_targets, return_dict=True)
             print(f"  ✓ Loss computation successful:")
             print(f"    CE Loss: {loss_dict['ce_loss'].item():.4f}")
-            print(f"    Energy Loss: {loss_dict['energy_loss'].item():.4f}")
+            print(f"    Magnitude Loss: {loss_dict['magnitude_loss'].item():.4f}")
             print(f"    Total Loss: {loss_dict['loss'].item():.4f}")
         
         return model
@@ -834,20 +834,20 @@ class DigitalOceanTrainer:
                         if batch_idx == 0:
                             mem_fwd_start = torch.cuda.max_memory_allocated() / 1024**3
                         
-                        # Use model.compute_loss() for paper-compliant training with energy regularization
-                        # Note: loss_dict['loss'] = ce_loss + energy_reg_weight * energy_loss (already weighted!)
+                        # Use model.compute_loss() for paper-compliant training with magnitude regularization
+                        # Note: loss_dict['loss'] = ce_loss + magnitude_reg_weight * magnitude_loss (already weighted!)
                         loss_dict = model.compute_loss(inputs, labels, return_dict=True)
                         loss = loss_dict['loss'] / self.args.gradient_accumulation
                         
-                        # Track loss components for monitoring (raw energy loss before weighting)
+                        # Track loss components for monitoring (raw magnitude loss before weighting)
                         ce_loss_value = loss_dict['ce_loss'].item()
-                        energy_loss_value = loss_dict['energy_loss'].item()
+                        magnitude_loss_value = loss_dict['magnitude_loss'].item()
                         
                         # Memory checkpoint: after loss
                         if batch_idx == 0:
                             mem_fwd = torch.cuda.max_memory_allocated() / 1024**3
                             print(f"  Memory after forward+loss: {mem_fwd:.2f}GB (delta: {mem_fwd-mem_data:.2f}GB)")
-                            print(f"  Loss breakdown - CE: {ce_loss_value:.4f}, Energy (raw): {energy_loss_value:.4f}")
+                            print(f"  Loss breakdown - CE: {ce_loss_value:.4f}, Magnitude (raw): {magnitude_loss_value:.4f}")
                     
                     # Memory checkpoint: before backward
                     if batch_idx == 0:
@@ -865,9 +865,9 @@ class DigitalOceanTrainer:
                     loss_dict = model.compute_loss(inputs, labels, return_dict=True)
                     loss = loss_dict['loss'] / self.args.gradient_accumulation
                     
-                    # Track loss components for monitoring (raw energy loss before weighting)
+                    # Track loss components for monitoring (raw magnitude loss before weighting)
                     ce_loss_value = loss_dict['ce_loss'].item()
-                    energy_loss_value = loss_dict['energy_loss'].item()
+                    magnitude_loss_value = loss_dict['magnitude_loss'].item()
                     
                     loss.backward()
                 
@@ -900,7 +900,7 @@ class DigitalOceanTrainer:
                 progress_bar.set_postfix({
                     'loss': f'{loss_value:.4f}',
                     'ce': f'{ce_loss_value:.4f}',
-                    'energy': f'{energy_loss_value:.4f}',
+                    'magnitude': f'{magnitude_loss_value:.4f}',
                     'lr': f'{scheduler.get_last_lr()[0]:.2e}'
                 })
                 
