@@ -14,7 +14,7 @@ from .model import (
     TemporalEigenstateConfig,
     TemporalFlowCell,
     ResonanceBlock,
-    HierarchicalTEN,
+    HierarchicalTENBlock,
 )
 
 # Alias for compatibility
