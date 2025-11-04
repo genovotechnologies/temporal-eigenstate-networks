@@ -10,9 +10,30 @@ This implementation follows the paper's ACTUAL efficient methods:
 
 import math
 from typing import Optional, Tuple, List
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+@dataclass
+class TemporalEigenstateConfig:
+    """Configuration for Temporal Eigenstate Networks."""
+    vocab_size: int = 50257
+    dim: int = 512
+    n_layers: int = 6
+    num_eigenstates: int = 64
+    num_cells: int = 2
+    max_seq_len: int = 2048
+    dropout: float = 0.1
+    tie_weights: bool = True
+    
+    def __post_init__(self):
+        """Validate configuration."""
+        assert self.dim > 0, "dim must be positive"
+        assert self.n_layers > 0, "n_layers must be positive"
+        assert self.num_eigenstates > 0, "num_eigenstates must be positive"
+        assert self.num_cells > 0, "num_cells must be positive"
 
 
 class TemporalFlowCell(nn.Module):
@@ -62,10 +83,9 @@ class TemporalFlowCell(nn.Module):
         state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        CORRECT MEMORY-EFFICIENT FORWARD PASS.
+        ULTRA MEMORY-EFFICIENT: Process with full detaching + in-place operations.
         
-        The trick: Process timesteps in CHUNKS with selective checkpointing.
-        Only keep gradients for projection layers, not recurrent states.
+        Key: Only the FINAL projection needs gradients, not the recurrent loop!
         """
         batch, seq_len, dim = x.shape
         device, dtype = x.device, x.dtype
@@ -82,50 +102,36 @@ class TemporalFlowCell(nn.Module):
         else:
             state_real, state_imag = state
         
-        # Project all inputs at once (cheap operation)
+        # Project all inputs at once
         beta = self.input_proj(x)  # (B, T, K)
         
-        # Process in chunks with smart checkpointing
-        # Key: We detach state after each chunk to prevent BPTT memory explosion
-        chunk_size = min(64, seq_len)  # Adaptive chunk size
-        outputs = []
+        # Pre-allocate output tensor (saves memory by avoiding list appends)
+        output_states = torch.empty(batch, seq_len, self.num_eigenstates, device=device, dtype=dtype)
         
-        for chunk_start in range(0, seq_len, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, seq_len)
-            chunk_len = chunk_end - chunk_start
+        # Process ALL timesteps with full detaching (no gradient graph!)
+        for t in range(seq_len):
+            # CRITICAL: Detach EVERY timestep (not just chunk boundaries!)
+            # This prevents ANY backprop through time
+            if t > 0:
+                state_real = state_real.detach()
+                state_imag = state_imag.detach()
             
-            # Process this chunk
-            chunk_outputs = []
-            for i in range(chunk_len):
-                t = chunk_start + i
-                
-                # Detach state at chunk boundaries (prevents inter-chunk gradients)
-                if i == 0 and chunk_start > 0:
-                    state_real = state_real.detach()
-                    state_imag = state_imag.detach()
-                
-                # Evolution: c(t) = λ * c(t-1) + β(t)
-                new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
-                new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
-                
-                # Resonance coupling
-                state_real = new_real @ self.resonance
-                state_imag = new_imag @ self.resonance
-                
-                # Store output (don't project yet - batch it!)
-                chunk_outputs.append(state_real)
+            # Evolution: c(t) = λ * c(t-1) + β(t)
+            new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
+            new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
             
-            # Stack chunk outputs and project ALL at once (memory efficient!)
-            if chunk_outputs:
-                chunk_states = torch.stack(chunk_outputs, dim=1)  # (B, chunk_len, K)
-                chunk_projected = self.output_proj(chunk_states)  # (B, chunk_len, dim)
-                outputs.append(chunk_projected)
+            # Resonance coupling
+            state_real = new_real @ self.resonance
+            state_imag = new_imag @ self.resonance
+            
+            # Store in pre-allocated tensor (no list overhead!)
+            output_states[:, t] = state_real
         
-        # Concatenate all chunks
-        all_outputs = torch.cat(outputs, dim=1)  # (B, T, dim)
-        all_outputs = self.norm(all_outputs)
+        # Project ALL states at once - THIS is where gradients flow!
+        outputs = self.output_proj(output_states)  # (B, T, dim)
+        outputs = self.norm(outputs)
         
-        return all_outputs, (state_real, state_imag)
+        return outputs, (state_real, state_imag)
 
 
 class ResonanceBlock(nn.Module):
@@ -200,33 +206,51 @@ class TemporalEigenstateNetwork(nn.Module):
     
     def __init__(
         self,
-        vocab_size: int,
-        dim: int = 512,
-        n_layers: int = 6,
-        num_eigenstates: int = 64,
-        num_cells: int = 2,  # REDUCED!
-        max_seq_len: int = 2048,
-        dropout: float = 0.1,
-        tie_weights: bool = True
+        config: Optional[TemporalEigenstateConfig] = None,
+        vocab_size: Optional[int] = None,
+        dim: Optional[int] = None,
+        n_layers: Optional[int] = None,
+        num_eigenstates: Optional[int] = None,
+        num_cells: Optional[int] = None,
+        max_seq_len: Optional[int] = None,
+        dropout: Optional[float] = None,
+        tie_weights: Optional[bool] = None
     ):
         super().__init__()
-        self.vocab_size = vocab_size
-        self.dim = dim
-        self.n_layers = n_layers
-        self.max_seq_len = max_seq_len
+        
+        # Support both config object and individual parameters
+        if config is None:
+            config = TemporalEigenstateConfig(
+                vocab_size=vocab_size or 50257,
+                dim=dim or 512,
+                n_layers=n_layers or 6,
+                num_eigenstates=num_eigenstates or 64,
+                num_cells=num_cells or 2,
+                max_seq_len=max_seq_len or 2048,
+                dropout=dropout or 0.1,
+                tie_weights=tie_weights if tie_weights is not None else True
+            )
+        
+        self.config = config
+        self.vocab_size = config.vocab_size
+        self.dim = config.dim
+        self.n_layers = config.n_layers
+        self.max_seq_len = config.max_seq_len
         
         # Embeddings
-        self.token_emb = nn.Embedding(vocab_size, dim)
-        self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, dim) * 0.02)
+        self.token_emb = nn.Embedding(config.vocab_size, config.dim)
+        self.pos_emb = nn.Parameter(torch.randn(1, config.max_seq_len, config.dim) * 0.02)
         
         # TEN blocks
         self.blocks = nn.ModuleList([
             ResonanceBlock(
-                dim=dim,
-                num_cells=num_cells,
-                num_eigenstates=num_eigenstates,
-                dropout=dropout
+                dim=config.dim,
+                num_cells=config.num_cells,
+                num_eigenstates=config.num_eigenstates,
+                dropout=config.dropout
             )
+            for _ in range(config.n_layers)
+        ])
             for _ in range(n_layers)
         ])
         

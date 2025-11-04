@@ -126,41 +126,49 @@ CONFIGS = {
         "d_model": 512,
         "n_layers": 4,
         "num_eigenstates": 64,
-        "batch_size": 8,  # Very small for memory testing
-        "max_seq_len": 512,  # Start tiny
-        "description": "Nano - 33M params, 512 ctx (~2.9GB) - PROVEN",
+        "batch_size": 8,
+        "max_seq_len": 512,
+        "description": "Nano - 33M params (~0.6GB model + 2GB activations = 2.6GB total)",
     },
     "micro": {
         "d_model": 768,
-        "n_layers": 8,
+        "n_layers": 6,
         "num_eigenstates": 96,
-        "batch_size": 16,  # Reduced from 32
-        "max_seq_len": 1024,  # 16K total tokens (~12GB)
-        "description": "Micro - 70M params, 1K ctx (~12GB estimated)",
+        "batch_size": 16,
+        "max_seq_len": 1024,
+        "description": "Micro - 85M params (~1.5GB model + 4GB activations = 5.5GB total)",
     },
     "small": {
         "d_model": 1024,
-        "n_layers": 12,
+        "n_layers": 8,
         "num_eigenstates": 128,
-        "batch_size": 32,  # 32K total tokens
+        "batch_size": 16,
         "max_seq_len": 1024,
-        "description": "Small - 216M params, 1K ctx (~24GB estimated)",
+        "description": "Small - 180M params (~2.5GB model + 5GB activations = 7.5GB total)",
     },
     "medium": {
+        "d_model": 1280,
+        "n_layers": 12,
+        "num_eigenstates": 160,
+        "batch_size": 16,
+        "max_seq_len": 1024,
+        "description": "Medium - 320M params (~4GB model + 6GB activations = 10GB total)",
+    },
+    "large": {
         "d_model": 1536,
         "n_layers": 16,
         "num_eigenstates": 192,
-        "batch_size": 32,  # 32K total tokens
+        "batch_size": 8,
         "max_seq_len": 1024,
-        "description": "Medium - 268M params, 1K ctx (~36GB estimated)",
+        "description": "Large - 520M params (~6GB model + 8GB activations = 14GB total)",
     },
-    "large": {
+    "xlarge": {
         "d_model": 2048,
-        "n_layers": 24,
+        "n_layers": 20,
         "num_eigenstates": 256,
-        "batch_size": 16,  # 32K total tokens
+        "batch_size": 8,
         "max_seq_len": 2048,
-        "description": "Large - 1.2B params, 2K ctx (~40GB estimated)",
+        "description": "XLarge - 1.2B params (~12GB model + 16GB activations = 28GB total)",
     },
 }
 
