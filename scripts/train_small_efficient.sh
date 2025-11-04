@@ -30,7 +30,6 @@ python3 examples/train_digitalocean.py \
   --pretokenized \
   --tokenized_dir /root/ten_workspace/tokenized/finewebedu \
   --epochs 1 \
-  --batch_size 16 \
   --max_seq_len 512 \
   --gradient_accumulation 2 \
   --save_steps 1000 \
