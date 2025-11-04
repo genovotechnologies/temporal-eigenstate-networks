@@ -54,18 +54,18 @@ def main():
     
     # Configuration
     config = TemporalEigenstateConfig(
-        d_model=256,           # Smaller for demo
-        n_heads=8,
-        n_layers=4,            # Fewer layers for demo
-        d_ff=1024,
-        max_seq_len=128,       # Shorter sequences for demo
-        num_eigenstates=64,
         vocab_size=5000,       # Small vocabulary for demo
+        dim=256,               # Hidden dimension
+        n_layers=4,            # Fewer layers for demo
+        num_eigenstates=64,    # Number of eigenstates
+        max_seq_len=128,       # Shorter sequences for demo
         dropout=0.1,
+        chunk_size=64,
+        use_gradient_checkpointing=False,  # Disabled for state tracking
     )
     
     print(f"\nModel Configuration:")
-    print(f"  d_model: {config.d_model}")
+    print(f"  dim: {config.dim}")
     print(f"  n_layers: {config.n_layers}")
     print(f"  num_eigenstates: {config.num_eigenstates}")
     print(f"  vocab_size: {config.vocab_size}")
@@ -225,7 +225,7 @@ def main():
     print(f"""
 ✓ Model: Temporal Eigenstate Network
   - Parameters: {model.count_parameters() / 1e6:.2f}M
-  - Hidden dim: {config.d_model}
+  - Hidden dim: {config.dim}
   - Layers: {config.n_layers}
   - Eigenstates: {config.num_eigenstates}
 
