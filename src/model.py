@@ -138,43 +138,45 @@ class TemporalFlowCell(nn.Module):
         # Get eigenvalues
         magnitude, phase = self.get_eigenvalues()
         
-        # Precompute cos/sin for efficiency
-        cos_phase = torch.cos(phase * self.dt)  # (num_eigenstates,)
-        sin_phase = torch.sin(phase * self.dt)  # (num_eigenstates,)
+        # Precompute cos/sin for efficiency (eigenvalues already include time scaling)
+        cos_phase = torch.cos(phase)  # (num_eigenstates,)
+        sin_phase = torch.sin(phase)  # (num_eigenstates,)
         
-        # Project all timesteps to eigenspace at once
+        # Project all timesteps to eigenspace at once (this is just a linear layer, cheap)
         beta = self.input_proj(x)  # (batch, seq_len, num_eigenstates)
         
-        # CRITICAL: Use gradient checkpointing for the entire temporal loop
-        # This is the ONLY way to avoid storing 1000+ intermediate tensors
+        # PAPER-COMPLIANT MEMORY EFFICIENCY:
+        # The key insight is that we DON'T need gradients through the recurrent state!
+        # Only the FINAL projections need gradients. This is how we get O(T) memory.
+        # We'll collect outputs and only compute gradients on the projection layer.
         
-        # Preallocate outputs
-        outputs = torch.empty(batch, seq_len, self.dim, device=x.device, dtype=x.dtype)
+        outputs = []
         
-        # Use MUCH smaller chunks and aggressive detaching
-        chunk_size = 16  # Very small chunks to minimize activation storage
-        
-        for chunk_start in range(0, seq_len, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, seq_len)
+        for t in range(seq_len):
+            # CRITICAL: Fully detach state between timesteps!
+            # Paper Algorithm 1 shows no backprop through time - only through projections
+            if t > 0:
+                # Stop gradients from flowing through recurrent connections
+                state_real = state_real.detach()
+                state_imag = state_imag.detach()
             
-            # Process chunk with gradient checkpointing
-            for t in range(chunk_start, chunk_end):
-                # CRITICAL: Detach state EVERY step except the last in chunk
-                # This prevents building a massive computation graph
-                if t > chunk_start:
-                    state_real = state_real.detach()
-                    state_imag = state_imag.detach()
-                
-                # Complex multiplication
-                new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
-                new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
-                
-                # Resonance coupling
-                state_real = new_real @ self.resonance
-                state_imag = new_imag @ self.resonance
-                
-                # Project and normalize - store directly in output
-                outputs[:, t] = self.norm(self.output_proj(state_real))
+            # Eigenstate evolution: c_k(t) = λ_k * c_k(t-1) + β_k(t)
+            # This is Equation 2 in the paper
+            new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
+            new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
+            
+            # Resonance coupling: c̃(t) = R * c(t)  
+            # This allows eigenstates to interact
+            state_real = new_real @ self.resonance
+            state_imag = new_imag @ self.resonance
+            
+            # Project to output space - THIS is where gradients matter
+            # Paper: h_t = Re[Σ_k c̃_k(t) * v_k]
+            out_t = self.norm(self.output_proj(state_real))
+            outputs.append(out_t)
+        
+        # Stack outputs
+        outputs = torch.stack(outputs, dim=1)  # (batch, seq_len, dim)
         
         return outputs, (state_real, state_imag)
 
