@@ -113,25 +113,18 @@ class TemporalFlowCell(nn.Module):
     def forward(
         self, 
         x: torch.Tensor, 
-        states: Optional[List] = None,
-        return_states: bool = False,
-        skip_output_projection: bool = False
-    ) -> torch.Tensor:
+        state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Forward pass.
+        Forward pass through temporal flow cell.
         
         Args:
-            x: Input tensor. Either:
-               - Token indices (batch, seq_len) if model has embedding layer
-               - Continuous features (batch, seq_len, dim) otherwise
-            states: Optional previous states for recurrent inference
-            return_states: Whether to return final states
-            skip_output_projection: Skip vocab projection to save memory (for training)
+            x: Input tensor (batch, seq_len, dim)
+            state: Optional previous state (state_real, state_imag) for recurrent inference
             
         Returns:
-            output: (batch, seq_len, dim) if skip_output_projection=True
-                    or (batch, seq_len, vocab_size) if skip_output_projection=False
-            states: (optional) Final states if return_states=True
+            output: (batch, seq_len, dim) processed sequence
+            state: (state_real, state_imag) final state tuple
         """
         batch, seq_len, dim = x.shape
         
