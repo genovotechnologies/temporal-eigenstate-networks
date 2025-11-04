@@ -1,7 +1,16 @@
 """
 Optimized Training Script for DigitalOcean L40S/RTX 6000 Ada (48GB)
+Updated for Paper-Compliant TEN Implementation
 
-This script is optimized for:
+This script uses the new paper-compliant features:
+- Proper eigenvalue initialization (Appendix B.2)
+- Hierarchical TEN (HTEN) support (Section 5)
+- Energy regularization (Theorem 4)
+- Chunk-based processing with gradient checkpointing
+- Efficient positional embeddings
+- Mixed precision (FP16) training
+
+Optimized for:
 - Long-range tasks (8192 token sequences)
 - Large model training (1024 dim, 8+ layers)
 - 48GB VRAM efficiency
@@ -10,6 +19,7 @@ This script is optimized for:
 Usage:
     python train_digitalocean.py --config large
     python train_digitalocean.py --config medium --max_seq_len 4096
+    python train_digitalocean.py --config large --use_hten  # Enable Hierarchical TEN
     python train_digitalocean.py --benchmark
 """
 
@@ -30,7 +40,6 @@ import json
 import multiprocessing as mp
 
 # CRITICAL: Set start method for multiprocessing BEFORE any CUDA operations
-# This prevents the "bootstrapping phase" error with spawn
 if __name__ == '__main__':
     mp.set_start_method('spawn', force=True)
 
@@ -38,16 +47,19 @@ if __name__ == '__main__':
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 
-# Enable TF32 for 2-3× speedup on Ampere+ GPUs (A100, RTX 3090, L40S)
+# Enable TF32 for 2-3× speedup on Ampere+ GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-
-# Set matmul precision for speed
 torch.set_float32_matmul_precision('high')
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from model import TemporalEigenstateConfig, TemporalEigenstateNetwork
+from model import (
+    TemporalEigenstateConfig, 
+    TemporalEigenstateNetwork,
+    print_model_summary,
+    count_parameters
+)
 
 
 # Fast pre-tokenized dataset loader
@@ -128,6 +140,8 @@ CONFIGS = {
         "num_eigenstates": 64,
         "batch_size": 8,
         "max_seq_len": 512,
+        "use_hten": False,
+        "energy_reg_weight": 0.01,
         "description": "Nano - 33M params (~0.6GB model + 2GB activations = 2.6GB total)",
     },
     "micro": {
@@ -136,6 +150,8 @@ CONFIGS = {
         "num_eigenstates": 96,
         "batch_size": 16,
         "max_seq_len": 1024,
+        "use_hten": False,
+        "energy_reg_weight": 0.01,
         "description": "Micro - 85M params (~1.5GB model + 4GB activations = 5.5GB total)",
     },
     "small": {
@@ -144,6 +160,8 @@ CONFIGS = {
         "num_eigenstates": 128,
         "batch_size": 16,
         "max_seq_len": 1024,
+        "use_hten": False,
+        "energy_reg_weight": 0.01,
         "description": "Small - 180M params (~2.5GB model + 5GB activations = 7.5GB total)",
     },
     "medium": {
@@ -152,6 +170,8 @@ CONFIGS = {
         "num_eigenstates": 160,
         "batch_size": 16,
         "max_seq_len": 1024,
+        "use_hten": False,
+        "energy_reg_weight": 0.01,
         "description": "Medium - 320M params (~4GB model + 6GB activations = 10GB total)",
     },
     "large": {
@@ -160,6 +180,9 @@ CONFIGS = {
         "num_eigenstates": 192,
         "batch_size": 8,
         "max_seq_len": 1024,
+        "use_hten": True,  # Enable HTEN for large model
+        "hten_scales": [1, 2, 4],
+        "energy_reg_weight": 0.02,  # Higher weight for stability
         "description": "Large - 520M params (~6GB model + 8GB activations = 14GB total)",
     },
     "xlarge": {
@@ -168,6 +191,9 @@ CONFIGS = {
         "num_eigenstates": 256,
         "batch_size": 8,
         "max_seq_len": 2048,
+        "use_hten": True,  # Enable HTEN for xlarge model
+        "hten_scales": [1, 2, 4, 8],
+        "energy_reg_weight": 0.02,  # Higher weight for stability
         "description": "XLarge - 1.2B params (~12GB model + 16GB activations = 28GB total)",
     },
 }
@@ -203,31 +229,53 @@ class DigitalOceanTrainer:
         print(f"\n⏱️  Elapsed: {elapsed/60:.1f} min | Cost: ${cost:.2f} | Remaining: ${remaining:.2f}")
         
     def create_model(self):
-        """Create and configure model"""
-        print(f"\n📦 Creating model...")
+        """Create and configure model with new paper-compliant features"""
+        print(f"\n📦 Creating model with paper-compliant TEN implementation...")
         
+        # Create configuration with new features
         model_config = TemporalEigenstateConfig(
-            d_model=self.config['d_model'],
-            n_heads=self.config.get('n_heads', self.config['d_model'] // 64),
-            n_layers=self.config['n_layers'],
-            d_ff=self.config.get('d_ff', self.config['d_model'] * 4),
-            max_seq_len=self.config['max_seq_len'],
-            num_eigenstates=self.config['num_eigenstates'],
-            dropout=self.config.get('dropout', 0.1),
             vocab_size=self.args.vocab_size,
+            dim=self.config['d_model'],
+            n_layers=self.config['n_layers'],
+            num_eigenstates=self.config['num_eigenstates'],
+            num_cells=self.config.get('num_cells', 2),
+            max_seq_len=self.config['max_seq_len'],
+            dropout=self.config.get('dropout', 0.1),
+            
+            # Memory optimizations
+            chunk_size=self.config.get('chunk_size', 64),
+            use_gradient_checkpointing=self.config.get('use_gradient_checkpointing', True),
+            
+            # Paper-compliant features
+            use_resonance=self.config.get('use_resonance', True),
+            resonance_epsilon=self.config.get('resonance_epsilon', 0.01),
+            eigenvalue_clip=self.config.get('eigenvalue_clip', 0.99),
+            ffn_multiplier=self.config.get('ffn_multiplier', 4.0),
+            
+            # Positional embeddings (learned is more efficient for training)
+            pos_emb_type=self.config.get('pos_emb_type', 'learned'),
+            
+            # Energy regularization (Theorem 4)
+            energy_reg_weight=self.config.get('energy_reg_weight', 0.01),
+            
+            # Hierarchical TEN (Section 5) - optional
+            use_hten=self.config.get('use_hten', False),
+            hten_scales=self.config.get('hten_scales', [1, 2, 4, 8]),
+            
+            tie_weights=True,  # Save memory
         )
         
         model = TemporalEigenstateNetwork(model_config).to(self.device)
         
-        # Count parameters
-        num_params = sum(p.numel() for p in model.parameters())
-        num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        # Print detailed model summary
+        print_model_summary(model, verbose=True)
         
-        print(f"  ✓ Model created successfully")
-        print(f"  Parameters: {num_params:,} ({num_params/1e6:.1f}M)")
-        print(f"  Trainable: {num_trainable:,}")
-        print(f"  Memory: ~{num_params * 4 / 1024**3:.2f} GB (fp32)")
-        print(f"  Config: {model_config.d_model}d, {model_config.n_layers}L, {model_config.num_eigenstates}E")
+        # Additional training info
+        num_params = count_parameters(model)
+        print(f"\n💾 Memory Estimates:")
+        print(f"  Model (FP32): ~{num_params * 4 / 1024**3:.2f} GB")
+        print(f"  Model (FP16): ~{num_params * 2 / 1024**3:.2f} GB")
+        print(f"  Training (FP16 + optimizer): ~{num_params * 10 / 1024**3:.2f} GB")
         
         # Test forward pass
         print(f"\n🧪 Testing forward pass...")
@@ -235,6 +283,15 @@ class DigitalOceanTrainer:
         with torch.no_grad():
             test_output = model(test_input)
         print(f"  ✓ Forward pass successful: {test_input.shape} -> {test_output.shape}")
+        
+        # Test loss computation with energy regularization
+        test_targets = torch.randint(0, self.args.vocab_size, (2, 128)).to(self.device)
+        with torch.no_grad():
+            loss_dict = model.compute_loss(test_input, test_targets, return_dict=True)
+            print(f"  ✓ Loss computation successful:")
+            print(f"    CE Loss: {loss_dict['ce_loss'].item():.4f}")
+            print(f"    Energy Loss: {loss_dict['energy_loss'].item():.4f}")
+            print(f"    Total Loss: {loss_dict['loss'].item():.4f}")
         
         return model
     
@@ -340,7 +397,7 @@ class DigitalOceanTrainer:
             
             # Create model
             model_config = TemporalEigenstateConfig(
-                d_model=config['d_model'],
+                dim=config['d_model'],
                 n_layers=config['n_layers'],
                 num_eigenstates=config['num_eigenstates'],
                 max_seq_len=max(sequence_lengths),
@@ -711,35 +768,31 @@ class DigitalOceanTrainer:
                     mem_data = torch.cuda.max_memory_allocated() / 1024**3
                     print(f"\n  Memory after data load: {mem_data:.2f}GB")
                 
-                # Forward pass
+                # Forward pass with new compute_loss API (includes energy regularization)
                 if use_amp:
                     with autocast(device_type='cuda', dtype=torch.float16):
-                        # Get hidden states WITHOUT vocab projection (saves memory!)
-                        hidden_states = model(inputs, skip_output_projection=True)
-                        
                         # Memory checkpoint: after forward
                         if batch_idx == 0:
+                            mem_fwd_start = torch.cuda.max_memory_allocated() / 1024**3
+                        
+                        # Use model.compute_loss() for paper-compliant training with energy regularization
+                        # Note: loss_dict['loss'] = ce_loss + energy_reg_weight * energy_loss (already weighted!)
+                        loss_dict = model.compute_loss(inputs, labels, return_dict=True)
+                        loss = loss_dict['loss'] / self.args.gradient_accumulation
+                        
+                        # Track loss components for monitoring (raw energy loss before weighting)
+                        ce_loss_value = loss_dict['ce_loss'].item()
+                        energy_loss_value = loss_dict['energy_loss'].item()
+                        
+                        # Memory checkpoint: after loss
+                        if batch_idx == 0:
                             mem_fwd = torch.cuda.max_memory_allocated() / 1024**3
-                            print(f"  Memory after forward: {mem_fwd:.2f}GB (delta: {mem_fwd-mem_data:.2f}GB)")
-                        
-                        # Compute logits only where needed using F.linear
-                        # This avoids materializing full (batch, seq, vocab) tensor
-                        # Instead compute loss in one go
-                        hidden_flat = hidden_states.reshape(-1, hidden_states.size(-1))  # (batch*seq, dim)
-                        labels_flat = labels.reshape(-1)  # (batch*seq,)
-                        
-                        # Use F.cross_entropy with direct weight access (no intermediate logits!)
-                        loss = nn.functional.cross_entropy(
-                            nn.functional.linear(hidden_flat, model.output.weight, model.output.bias),
-                            labels_flat,
-                            ignore_index=tokenizer.pad_token_id if tokenizer.pad_token_id else -100
-                        )
-                        loss = loss / self.args.gradient_accumulation
+                            print(f"  Memory after forward+loss: {mem_fwd:.2f}GB (delta: {mem_fwd-mem_data:.2f}GB)")
+                            print(f"  Loss breakdown - CE: {ce_loss_value:.4f}, Energy (raw): {energy_loss_value:.4f}")
                     
                     # Memory checkpoint: before backward
                     if batch_idx == 0:
                         mem_loss = torch.cuda.max_memory_allocated() / 1024**3
-                        print(f"  Memory after loss: {mem_loss:.2f}GB (delta: {mem_loss-mem_fwd:.2f}GB)")
                     
                     scaler.scale(loss).backward()
                     
@@ -749,28 +802,23 @@ class DigitalOceanTrainer:
                         print(f"  Memory after backward: {mem_bwd:.2f}GB (delta: {mem_bwd-mem_loss:.2f}GB)")
                         print(f"  TOTAL PEAK: {mem_bwd:.2f}GB\n")
                 else:
-                    # Get hidden states WITHOUT vocab projection
-                    hidden_states = model(inputs, skip_output_projection=True)
+                    # Use model.compute_loss() for paper-compliant training with energy regularization
+                    loss_dict = model.compute_loss(inputs, labels, return_dict=True)
+                    loss = loss_dict['loss'] / self.args.gradient_accumulation
                     
-                    # Compute loss directly without materializing full logits
-                    hidden_flat = hidden_states.reshape(-1, hidden_states.size(-1))
-                    labels_flat = labels.reshape(-1)
+                    # Track loss components for monitoring (raw energy loss before weighting)
+                    ce_loss_value = loss_dict['ce_loss'].item()
+                    energy_loss_value = loss_dict['energy_loss'].item()
                     
-                    loss = nn.functional.cross_entropy(
-                        nn.functional.linear(hidden_flat, model.output.weight, model.output.bias),
-                        labels_flat,
-                        ignore_index=tokenizer.pad_token_id if tokenizer.pad_token_id else -100
-                    )
-                    loss = loss / self.args.gradient_accumulation
                     loss.backward()
                 
-                # Store loss value before deleting tensor
+                # Store loss values before cleanup
                 loss_value = loss.item() * self.args.gradient_accumulation
                 epoch_loss += loss_value
                 
                 # CRITICAL: Aggressive memory cleanup every batch
                 # Delete intermediate tensors explicitly
-                del hidden_states, loss, labels, inputs, input_ids
+                del loss_dict, loss, labels, inputs, input_ids
                 
                 # Gradient accumulation
                 if (batch_idx + 1) % self.args.gradient_accumulation == 0:
@@ -789,9 +837,11 @@ class DigitalOceanTrainer:
                         torch.cuda.empty_cache()
                         gc.collect()
                 
-                # Update progress bar
+                # Update progress bar with loss breakdown
                 progress_bar.set_postfix({
                     'loss': f'{loss_value:.4f}',
+                    'ce': f'{ce_loss_value:.4f}',
+                    'energy': f'{energy_loss_value:.4f}',
                     'lr': f'{scheduler.get_last_lr()[0]:.2e}'
                 })
                 
@@ -893,6 +943,14 @@ def main():
                        help="Disable torch.compile() (use if training hangs/deadlocks)")
     parser.add_argument("--gradient_checkpointing", action="store_true",
                        help="Enable gradient checkpointing to reduce memory (trades compute for memory)")
+    
+    # Paper-compliant features
+    parser.add_argument("--use_hten", action="store_true",
+                       help="Enable Hierarchical TEN (multi-scale processing, Section 5)")
+    parser.add_argument("--hten_scales", type=str, default=None,
+                       help="HTEN scales as comma-separated list (e.g., '1,2,4,8')")
+    parser.add_argument("--energy_reg_weight", type=float, default=None,
+                       help="Energy regularization weight (Theorem 4, default: 0.01)")
 
     # Dry-run and tokenizer options
     parser.add_argument("--dry_run", action="store_true",
@@ -917,6 +975,14 @@ def main():
     config = CONFIGS[args.config].copy()
     if args.max_seq_len:
         config['max_seq_len'] = args.max_seq_len
+    
+    # Override with command-line arguments for paper features
+    if args.use_hten:
+        config['use_hten'] = True
+    if args.hten_scales:
+        config['hten_scales'] = [int(x.strip()) for x in args.hten_scales.split(',')]
+    if args.energy_reg_weight is not None:
+        config['energy_reg_weight'] = args.energy_reg_weight
     
     # Print configuration
     print("\n" + "=" * 80)
