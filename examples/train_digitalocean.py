@@ -196,6 +196,45 @@ CONFIGS = {
         "energy_reg_weight": 0.02,  # Higher weight for stability
         "description": "XLarge - 1.2B params (~12GB model + 16GB activations = 28GB total)",
     },
+    # ===== LONG-RANGE CONFIGS (use pre-tokenized 32K chunks) =====
+    "small_32k": {
+        "d_model": 1024,
+        "n_layers": 8,
+        "num_eigenstates": 128,
+        "batch_size": 4,  # Smaller batch for long sequences
+        "max_seq_len": 32768,  # Match pre-tokenized chunks!
+        "chunk_size": 256,  # Larger chunks for long sequences
+        "use_gradient_checkpointing": True,  # Essential for memory
+        "use_hten": False,
+        "energy_reg_weight": 0.01,
+        "description": "Small 32K - 123M params, 32K context (zero waste!)",
+    },
+    "medium_32k": {
+        "d_model": 1280,
+        "n_layers": 12,
+        "num_eigenstates": 160,
+        "batch_size": 2,  # Smaller batch for long sequences
+        "max_seq_len": 32768,  # Match pre-tokenized chunks!
+        "chunk_size": 256,  # Larger chunks for long sequences
+        "use_gradient_checkpointing": True,  # Essential for memory
+        "use_hten": True,  # HTEN helps with long context
+        "hten_scales": [1, 2, 4],
+        "energy_reg_weight": 0.01,
+        "description": "Medium 32K - 320M params, 32K context with HTEN",
+    },
+    "large_32k": {
+        "d_model": 1536,
+        "n_layers": 16,
+        "num_eigenstates": 192,
+        "batch_size": 1,  # Single sample for memory
+        "max_seq_len": 32768,  # Match pre-tokenized chunks!
+        "chunk_size": 256,  # Larger chunks for long sequences
+        "use_gradient_checkpointing": True,  # Essential for memory
+        "use_hten": True,  # HTEN essential for large+long
+        "hten_scales": [1, 2, 4, 8],
+        "energy_reg_weight": 0.02,
+        "description": "Large 32K - 520M params, 32K context with HTEN (max memory!)",
+    },
 }
 
 
