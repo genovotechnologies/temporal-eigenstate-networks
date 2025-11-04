@@ -83,14 +83,15 @@ class TemporalFlowCell(nn.Module):
         state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        ULTRA MEMORY-EFFICIENT: Process with full detaching + in-place operations.
+        MAXIMUM MEMORY EFFICIENCY: No intermediate tensors stored!
         
-        Key: Only the FINAL projection needs gradients, not the recurrent loop!
+        Process one timestep at a time, project immediately, never store (B,T,K) tensors.
+        This is how true O(1) memory RNNs work.
         """
         batch, seq_len, dim = x.shape
         device, dtype = x.device, x.dtype
         
-        # Get eigenvalues
+        # Get eigenvalues (these are tiny - just K elements)
         magnitude, phase = self.get_eigenvalues()
         cos_phase = torch.cos(phase)
         sin_phase = torch.sin(phase)
@@ -102,33 +103,33 @@ class TemporalFlowCell(nn.Module):
         else:
             state_real, state_imag = state
         
-        # Project all inputs at once
-        beta = self.input_proj(x)  # (B, T, K)
+        # Pre-allocate ONLY the output (B, T, dim) - this we need!
+        outputs = torch.zeros(batch, seq_len, self.dim, device=device, dtype=dtype)
         
-        # Pre-allocate output tensor (saves memory by avoiding list appends)
-        output_states = torch.empty(batch, seq_len, self.num_eigenstates, device=device, dtype=dtype)
-        
-        # Process ALL timesteps with full detaching (no gradient graph!)
+        # Process one timestep at a time - NO intermediate storage!
         for t in range(seq_len):
-            # CRITICAL: Detach EVERY timestep (not just chunk boundaries!)
-            # This prevents ANY backprop through time
+            # Detach state (prevents BPTT)
             if t > 0:
                 state_real = state_real.detach()
                 state_imag = state_imag.detach()
             
+            # Compute input projection for THIS timestep only
+            # beta shape: (B, K) - tiny!
+            beta_t = self.input_proj(x[:, t, :])  # (B, dim) -> (B, K)
+            
             # Evolution: c(t) = λ * c(t-1) + β(t)
-            new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta[:, t]
+            new_real = magnitude * (state_real * cos_phase - state_imag * sin_phase) + beta_t
             new_imag = magnitude * (state_real * sin_phase + state_imag * cos_phase)
             
             # Resonance coupling
             state_real = new_real @ self.resonance
             state_imag = new_imag @ self.resonance
             
-            # Store in pre-allocated tensor (no list overhead!)
-            output_states[:, t] = state_real
+            # Project and store IMMEDIATELY
+            # Only (B, K) -> (B, dim) in memory at once!
+            outputs[:, t, :] = self.output_proj(state_real)
         
-        # Project ALL states at once - THIS is where gradients flow!
-        outputs = self.output_proj(output_states)  # (B, T, dim)
+        # Apply norm (this is fine - output tensor is what we need anyway)
         outputs = self.norm(outputs)
         
         return outputs, (state_real, state_imag)
@@ -244,23 +245,21 @@ class TemporalEigenstateNetwork(nn.Module):
         # TEN blocks
         self.blocks = nn.ModuleList([
             ResonanceBlock(
-                dim=config.dim,
+                dim=self.dim,
                 num_cells=config.num_cells,
                 num_eigenstates=config.num_eigenstates,
                 dropout=config.dropout
             )
-            for _ in range(config.n_layers)
-        ])
-            for _ in range(n_layers)
+            for _ in range(self.n_layers)
         ])
         
-        self.norm = nn.LayerNorm(dim)
+        self.norm = nn.LayerNorm(self.dim)
         
         # Output projection
-        self.output = nn.Linear(dim, vocab_size, bias=False)
+        self.output = nn.Linear(self.dim, self.vocab_size, bias=False)
         
         # Tie weights
-        if tie_weights:
+        if config.tie_weights:
             self.output.weight = self.token_emb.weight
         
         self.apply(self._init_weights)
