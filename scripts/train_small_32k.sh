@@ -40,7 +40,7 @@ python3 examples/train_digitalocean.py \
     --mixed_precision \
     --num_workers 4 \
     --gradient_accumulation 4 \
-    --save_every 1000 \
+    --save_steps 1000 \
     2>&1 | tee "$LOG_FILE"
 
 echo ""
