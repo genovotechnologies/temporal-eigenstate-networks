@@ -256,15 +256,15 @@ Table~\ref{tab:speed} shows that both backends eliminate the sequential bottlene
 \centering
 \caption{Inference time (ms) on a single NVIDIA A100 40GB. All models: $d = 512$, 6 layers, $\sim$42--45M params, float32. Transformer uses \texttt{scaled\_dot\_product\_attention} with \texttt{is\_causal=True}, which dispatches to fused SDPA kernels. Batch sizes: 16 for $T \leq 2048$, 8 for $T = 4096$, 4 for $T = 8192$.}
 \label{tab:speed}
-\begin{tabular}{lccccc}
+\begin{tabular}{lcccccc}
 \toprule
-Model & $T\!=\!512$ & $T\!=\!1024$ & $T\!=\!2048$ & $T\!=\!4096$ & $T\!=\!8192$ \\
+Model & $T\!=\!512$ & $T\!=\!2048$ & $T\!=\!8192$ & $T\!=\!16384$ & $T\!=\!32768$ \\
 \midrule
-TEN-FFT & \textbf{40.0} & \textbf{78.6} & \textbf{153.3} & \textbf{153.5} & \textbf{154.3} \\
-TEN-Pro & 40.5 & 79.4 & 154.7 & 154.9 & 155.7 \\
-Transformer (fused SDPA) & 42.9 & 87.2 & 180.2 & 199.0 & 238.0 \\
+TEN-FFT & \textbf{40} & \textbf{153} & \textbf{306} & \textbf{308} & \textbf{311} \\
+TEN-Pro & 40 & 155 & 309 & 311 & 314 \\
+Transformer (fused SDPA) & 43 & 180 & 476 & 634 & 961 \\
 \midrule
-Speedup (FFT vs Trans) & 1.07$\times$ & 1.11$\times$ & 1.18$\times$ & 1.30$\times$ & 1.54$\times$ \\
+Speedup (FFT vs Trans) & 1.07$\times$ & 1.18$\times$ & 1.55$\times$ & 2.06$\times$ & 3.09$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -275,11 +275,11 @@ Speedup (FFT vs Trans) & 1.07$\times$ & 1.11$\times$ & 1.18$\times$ & 1.30$\time
 \label{tab:memory}
 \begin{tabular}{lccccc}
 \toprule
-Model & $T\!=\!512$ & $T\!=\!1024$ & $T\!=\!2048$ & $T\!=\!4096$ & $T\!=\!8192$ \\
+Model & $T\!=\!512$ & $T\!=\!2048$ & $T\!=\!8192$ & $T\!=\!16384$ & $T\!=\!32768$ \\
 \midrule
-TEN-FFT & 1867 & 3549 & 6911 & 6915 & 6924 \\
-TEN-Pro & 1872 & 3558 & 6928 & 6932 & 6941 \\
-Transformer & 1888 & 3568 & 6930 & 6937 & 6944 \\
+TEN-FFT & 1855 & 6898 & 13633 & 13650 & 13683 \\
+TEN-Pro & 1859 & 6916 & 13667 & 13684 & 13717 \\
+Transformer & 1872 & 6916 & 13650 & 13667 & 13701 \\
 \bottomrule
 \end{tabular}
 \end{table}
