@@ -258,13 +258,14 @@ Table~\ref{tab:speed} shows that both backends eliminate the sequential bottlene
 \label{tab:speed}
 \begin{tabular}{lcccccc}
 \toprule
-Model & $T\!=\!512$ & $T\!=\!2048$ & $T\!=\!8192$ & $T\!=\!16384$ & $T\!=\!32768$ \\
+Model & $T\!=\!512$ & $T\!=\!2048$ & $T\!=\!8192$ & $T\!=\!16384$ & $T\!=\!32768$ & $T\!=\!65536$ \\
 \midrule
-TEN-FFT & \textbf{40} & \textbf{153} & \textbf{306} & \textbf{308} & \textbf{311} \\
-TEN-Pro & 40 & 155 & 309 & 311 & 314 \\
-Transformer (fused SDPA) & 43 & 180 & 476 & 634 & 961 \\
+TEN-FFT & \textbf{23} & \textbf{80} & \textbf{310} & \textbf{312} & \textbf{315} & \textbf{320} \\
+Naive attention & 26 & 147 & OOM & OOM & OOM & OOM \\
+Transformer (SDPA) & 23 & 92 & 473 & 631 & 958 & 1669 \\
 \midrule
-Speedup (FFT vs Trans) & 1.07$\times$ & 1.18$\times$ & 1.55$\times$ & 2.06$\times$ & 3.09$\times$ \\
+Speedup (vs naive) & 1.1$\times$ & 1.8$\times$ & --- & --- & --- & --- \\
+Speedup (vs SDPA) & 1.0$\times$ & 1.2$\times$ & 1.5$\times$ & 2.0$\times$ & 3.0$\times$ & \textbf{5.2}$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -273,13 +274,14 @@ Speedup (FFT vs Trans) & 1.07$\times$ & 1.18$\times$ & 1.55$\times$ & 2.06$\time
 \centering
 \caption{Peak GPU memory (MB) at the batch sizes above.}
 \label{tab:memory}
-\begin{tabular}{lccccc}
+\begin{tabular}{lcccccc}
 \toprule
-Model & $T\!=\!512$ & $T\!=\!2048$ & $T\!=\!8192$ & $T\!=\!16384$ & $T\!=\!32768$ \\
+& $T\!=\!512$ & $T\!=\!2048$ & $T\!=\!8192$ & $T\!=\!32768$ & $T\!=\!65536$ & $T\!=\!131072$ \\
 \midrule
-TEN-FFT & 1855 & 6898 & 13633 & 13650 & 13683 \\
-TEN-Pro & 1859 & 6916 & 13667 & 13684 & 13717 \\
-Transformer & 1872 & 6916 & 13650 & 13667 & 13701 \\
+Attn matrix (per layer) & 8MB & 134MB & 2.1GB & 34.4GB & 137GB & 550GB \\
+TEN eigenstates & 0.3MB & 1.0MB & 4.2MB & 16.8MB & 33.6MB & 67.1MB \\
+\midrule
+Memory ratio & 32$\times$ & \textbf{128}$\times$ & 512$\times$ & 2048$\times$ & 4096$\times$ & \textbf{8192}$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
