@@ -256,16 +256,15 @@ Table~\ref{tab:speed} shows that both backends eliminate the sequential bottlene
 \centering
 \caption{Inference time (ms) on a single NVIDIA A100 40GB. All models: $d = 512$, 6 layers, $\sim$42--45M params, float32. Transformer uses \texttt{scaled\_dot\_product\_attention} with \texttt{is\_causal=True}, which dispatches to fused SDPA kernels. Batch sizes: 16 for $T \leq 2048$, 8 for $T = 4096$, 4 for $T = 8192$.}
 \label{tab:speed}
-\begin{tabular}{lcccccc}
+\begin{tabular}{lccccccc}
 \toprule
-Model & $T\!=\!512$ & $T\!=\!2048$ & $T\!=\!8192$ & $T\!=\!16384$ & $T\!=\!32768$ & $T\!=\!65536$ \\
+Model & $T\!=\!2048$ & $T\!=\!8192$ & $T\!=\!16384$ & $T\!=\!32768$ & $T\!=\!65536$ & $T\!=\!131072$ \\
 \midrule
-TEN-FFT & \textbf{23} & \textbf{80} & \textbf{310} & \textbf{312} & \textbf{315} & \textbf{320} \\
-Naive attention & 26 & 147 & OOM & OOM & OOM & OOM \\
-Transformer (SDPA) & 23 & 92 & 473 & 631 & 958 & 1669 \\
+TEN-FFT & \textbf{43} & \textbf{155} & \textbf{309} & \textbf{616} & \textbf{622} & \textbf{638} \\
+TEN-Pro & 41 & 156 & 311 & 621 & 627 & 643 \\
+Transformer (SDPA) & 47 & 237 & 625 & 1873 & 3262 & 6280 \\
 \midrule
-Speedup (vs naive) & 1.1$\times$ & 1.8$\times$ & --- & --- & --- & --- \\
-Speedup (vs SDPA) & 1.0$\times$ & 1.2$\times$ & 1.5$\times$ & 2.0$\times$ & 3.0$\times$ & \textbf{5.2}$\times$ \\
+Speedup (FFT vs SDPA) & 1.1$\times$ & 1.5$\times$ & 2.0$\times$ & 3.0$\times$ & 5.2$\times$ & \textbf{9.8}$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
