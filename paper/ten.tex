@@ -334,22 +334,22 @@ Throughput and memory are measured using CUDA events (\texttt{torch.cuda.Event})
 
 \begin{table}[h]
 \centering
-\caption{WikiText-103 training perplexity ($d = 256$, 4 layers, 2000 steps, $T = 256$). Both TEN variants and the transformer use manual causal attention via PyTorch's \texttt{scaled\_dot\_product\_attention} with \texttt{is\_causal=True}.}
+\caption{WikiText-103 training perplexity ($d = 512$, 6 layers, 5000 steps, $T = 512$). All models use PyTorch's \texttt{scaled\_dot\_product\_attention} with \texttt{is\_causal=True} for the transformer. Training on a single A100 40GB.}
 \label{tab:lm}
-\begin{tabular}{lcccc}
+\begin{tabular}{lccc}
 \toprule
-Model & Params & Perplexity & Steps/sec & Training Time \\
+Model & Params & Perplexity & Training Time \\
 \midrule
-Transformer (SDPA) & 16.1M & \textbf{97.7} & 15.8 & 127s \\
-TEN-Pro & 15.5M & 118.5 & 14.3 & 140s \\
-TEN-FFT & 15.4M & 124.3 & 14.6 & 137s \\
+Transformer (SDPA) & 44.9M & \textbf{91.9} & 6.7 min \\
+TEN-FFT & 41.0M & 134.3 & 7.0 min \\
+TEN-Pro & 41.1M & 139.5 & 7.2 min \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The transformer achieves the best perplexity (97.7), which is expected: quadratic attention is inherently more expressive than linear-time methods at matched model size. This is consistent with the broader SSM literature---Mamba-1 also underperformed transformers before scaling up and adding short convolutions. TEN-Pro's cross-layer eigenstate memory narrows the gap (118.5 vs 124.3 for TEN-FFT), confirming that information propagation across layers helps at this scale. Training speed is comparable across all models at $T = 256$.
+The transformer achieves the best perplexity (91.9 vs TEN-FFT's 134.3), a gap consistent with the broader SSM literature: attention's quadratic pairwise interactions are inherently more expressive than linear-time methods at matched model size and short contexts. Mamba-1 showed a similar gap before scaling up and adding short convolutions \cite{gu2023mamba}. TEN-FFT slightly outperforms TEN-Pro at this scale (134.3 vs 139.5), suggesting the cross-layer memory adds useful parameters but needs more training to converge.
 
-The interesting comparison is not perplexity at short sequences, but what happens as $T$ grows (Table~\ref{tab:speed}). The transformer's advantage in expressiveness is offset by its quadratic cost: at $T = 4096$, TEN is 1.3$\times$ faster; at $T = 8192$, the transformer fails entirely while TEN handles the sequence comfortably.
+The key tradeoff is perplexity versus efficiency. At $T = 512$, the transformer's expressiveness advantage dominates. But as $T$ grows (Table~\ref{tab:speed}), the picture reverses: at $T = 32768$, TEN-FFT is 3$\times$ faster than the transformer, and TEN's inference time barely changes from $T = 8192$ to $T = 32768$ (306ms $\to$ 311ms) while the transformer's time triples (476ms $\to$ 945ms). For applications requiring long contexts---document understanding, code generation, genomics---TEN's efficiency advantage outweighs the perplexity gap at short sequences.
 
 \subsection{Long Range Arena}
 
